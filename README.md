@@ -8,6 +8,8 @@
   - ✅ **承認3ゲート**: ①週次企画の選定 ②日次X投稿12本の一括/個別承認・差戻(理由付き) ③有料note全文プレビュー→公開
   - 📊 **KPIダッシュボード**: フォロワー・売上の2軸グラフ(Chart.js)+日次明細テーブル
   - 🛡️ **QAチェッカー(Mio)**: 禁止表現・法令リスク(薬機法/景表法/金商法/ステマ規制)を実際に検出する実動ロジック
+  - 🔗 **アフィリンク自動埋め込み**: 提携済みリンクを1回登録すれば、投稿文からツール名を自動検出してリンク+PR表記を自動挿入(承認画面のワンボタン/埋め込み後に自動再QA)
+  - 📖 **用語注釈辞書**: 固有名詞(KDP・Etsy等)の素人向け注釈を辞書管理。Yutoの執筆ルールに組み込み
 
 ## URL
 - **サンドボックスプレビュー**: https://3000-i94l1sj6tl7trvmsyql1g-3844e1b6.sandbox.novita.ai
@@ -29,12 +31,23 @@
 | POST | `/api/qa/check` | QAチェック実行 `{text, has_affiliate?}` |
 | GET | `/api/qa/rules` | 禁止表現ルールDB |
 | POST | `/api/simulate/tick` | デモ: ワーカー状態を擬似進行 |
+| GET/POST | `/api/affiliate/links` | アフィリンク一覧/登録 |
+| POST | `/api/affiliate/links/:id/toggle` `/delete` | リンク停止・再開/削除 |
+| POST | `/api/affiliate/embed` | 埋め込みプレビュー `{text}` |
+| POST | `/api/posts/:id/embed-affiliate` | 投稿へ自動埋め込み+再QA |
+| GET | `/api/glossary` / POST `/api/glossary/suggest` | 用語辞書/注釈サジェスト |
 
 ## データアーキテクチャ
 - **ストレージ**: Cloudflare D1(ローカルは `--local` SQLite)
 - **テーブル**: `worker_status` / `worker_logs` / `topic_candidates` / `x_posts` / `note_articles` / `kpi_daily` / `approval_queue` / `task_queue`
 - **データフロー**: 企画承認→Kai翻訳タスク投入 / 投稿承認→Sora予約タスク投入 / 差戻→Yuto書き直しタスク投入(task_queue経由で連鎖)
 - **QAロジック**: `src/qa-rules.ts` に禁止表現DB(指示書08章)を実装。API・UI両方から利用
+
+## コンテンツ方針(2回目の修正で反映)
+- **素人向け注釈**: 固有名詞初出時に「※KDP=Amazonで誰でも無料で電子書籍を出せる仕組み」形式の1行注釈を必須化(glossaryテーブル+Yutoプロンプトに反映)
+- **金額は円換算を先に**: 「月45万円($3,000)」形式
+- **リプ誘発枠(枠5・9・12)**: 専門知識ゼロでも答えられる普遍的なお金の質問(「月3万円あったら何に使う?」「副業を始めない理由①〜④」等)を毎日3本配置
+- **アフィリエイト運用**: ASP提携申請のみ人間が実施(規約上必須)。リンク登録後は完全自動 — ツール名検出→リンク挿入→PR表記→再QAまでワンボタン/本番ではYuto執筆時に自動実行
 
 ## 指示書からの変更点(改善)
 元の指示書はAI作成のため、以下を現実的な構成に調整しました:

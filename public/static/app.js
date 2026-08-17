@@ -233,6 +233,7 @@ function qaBadge(qa_status, qa_issues) {
 function postCard(p) {
   let issues = [];
   try { issues = JSON.parse(p.qa_issues || '[]'); } catch (e) {}
+  const isAffiliateSlot = p.slot_number === 8 || (p.body || '').includes('#PR');
   return `
   <article class="post-card bg-white rounded-xl shadow p-4 flex flex-col gap-2">
     <div class="flex items-center justify-between">
@@ -241,6 +242,7 @@ function postCard(p) {
     </div>
     <p class="text-sm whitespace-pre-wrap leading-relaxed flex-1">${esc(p.body)}</p>
     ${issues.length ? `<div class="bg-amber-50 border border-amber-200 rounded-lg p-2 text-xs text-amber-800">${issues.map((i) => `<div><b>[${esc(i.rule)}]</b> ${esc(i.detail)}</div>`).join('')}</div>` : ''}
+    ${isAffiliateSlot ? `<button class="embed-affiliate-btn w-full bg-brand-orange/10 text-brand-orange border border-brand-orange/40 py-1.5 rounded-lg text-xs font-bold hover:bg-brand-orange/20" data-id="${esc(p.post_id)}"><i class="fas fa-link mr-1"></i>アフィリンクを自動埋め込み</button>` : ''}
     <div class="flex gap-2 pt-1">
       <button class="decision-btn flex-1 bg-emerald-600 text-white py-1.5 rounded-lg text-xs font-bold hover:opacity-90" data-kind="post" data-id="${esc(p.post_id)}" data-decision="approved"><i class="fas fa-check mr-1"></i>承認</button>
       <button class="decision-btn flex-1 bg-slate-200 text-slate-700 py-1.5 rounded-lg text-xs font-bold hover:bg-slate-300" data-kind="post" data-id="${esc(p.post_id)}" data-decision="rejected"><i class="fas fa-rotate-left mr-1"></i>差戻</button>
@@ -289,6 +291,19 @@ function noteCard(n) {
 }
 
 function bindDecisionButtons() {
+  document.querySelectorAll('.embed-affiliate-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const { data } = await axios.post(`/api/posts/${btn.dataset.id}/embed-affiliate`);
+      if (data.ok) {
+        toast(`${data.result.detected.map((d) => d.tool_name).join('・')} のリンクを埋め込みました${data.result.pr_added ? '(PR表記も自動追加)' : ''}`);
+        renderApprove();
+      } else {
+        toast(data.message || '埋め込み対象が見つかりませんでした', 'error');
+        btn.disabled = false;
+      }
+    });
+  });
   document.querySelectorAll('.decision-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const { kind, id, decision } = btn.dataset;
@@ -446,6 +461,113 @@ async function renderQA() {
   });
 }
 
+/* ============ アフィリンク管理ビュー ============ */
+async function renderAffiliate() {
+  const [linksRes, glossaryRes] = await Promise.all([
+    axios.get('/api/affiliate/links'),
+    axios.get('/api/glossary')
+  ]);
+  const links = linksRes.data.links;
+  const glossary = glossaryRes.data.glossary;
+
+  $app.innerHTML = `
+  <div class="fade-in max-w-4xl mx-auto space-y-6">
+    <h2 class="font-bold text-lg text-brand-navy"><i class="fas fa-link mr-2"></i>アフィリエイトリンク管理</h2>
+    <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-slate-700">
+      <p class="font-bold text-brand-navy mb-1"><i class="fas fa-circle-info mr-1"></i>仕組み</p>
+      <p>ASP(A8.net等)への提携申請は規約上、人間の操作が必要です。<b>提携承認後にここへ1回登録</b>すれば、以後は投稿文からツール名を自動検出し、リンク+PR表記を自動で埋め込みます(承認画面のボタン、または本番ではYutoが執筆時に自動実行)。</p>
+    </div>
+
+    <section id="affiliate-register" class="bg-white rounded-xl shadow p-4 space-y-3">
+      <h3 class="font-bold text-sm text-brand-navy">新規リンク登録</h3>
+      <div class="grid sm:grid-cols-2 gap-3">
+        <input id="af-tool" class="border border-slate-300 rounded-lg p-2 text-sm" placeholder="ツール名(例: ElevenLabs)">
+        <input id="af-aliases" class="border border-slate-300 rounded-lg p-2 text-sm" placeholder="検出ワード カンマ区切り(例: イレブンラボ,elevenlabs)">
+        <input id="af-url" class="border border-slate-300 rounded-lg p-2 text-sm sm:col-span-2" placeholder="アフィリエイトURL(提携承認後に発行されたもの)">
+        <input id="af-program" class="border border-slate-300 rounded-lg p-2 text-sm" placeholder="ASP名(例: A8.net)">
+        <input id="af-note" class="border border-slate-300 rounded-lg p-2 text-sm" placeholder="メモ(報酬率など)">
+      </div>
+      <button id="af-add-btn" class="bg-brand-navy text-white px-5 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-plus mr-1"></i>登録</button>
+    </section>
+
+    <section id="affiliate-list" class="bg-white rounded-xl shadow p-4">
+      <h3 class="font-bold text-sm text-brand-navy mb-3">登録済みリンク(${links.length}件)</h3>
+      <div class="space-y-2">
+        ${links.length ? links.map((l) => `
+        <div class="border border-slate-200 rounded-lg p-3 flex items-center justify-between flex-wrap gap-2">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="font-bold text-sm">${esc(l.tool_name)}</span>
+              <span class="text-[10px] px-2 py-0.5 rounded-full font-bold ${l.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}">${l.status === 'active' ? '自動埋め込み中' : '停止中'}</span>
+              ${l.program ? `<span class="text-[10px] text-slate-400">${esc(l.program)}</span>` : ''}
+            </div>
+            <div class="text-xs text-slate-500 truncate max-w-md">${esc(l.affiliate_url)}</div>
+            ${l.note ? `<div class="text-[11px] text-amber-600">${esc(l.note)}</div>` : ''}
+          </div>
+          <div class="flex gap-2">
+            <button class="af-toggle-btn text-xs bg-slate-200 px-3 py-1.5 rounded-lg hover:bg-slate-300" data-id="${esc(l.link_id)}">${l.status === 'active' ? '停止' : '再開'}</button>
+            <button class="af-delete-btn text-xs bg-red-100 text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-200" data-id="${esc(l.link_id)}">削除</button>
+          </div>
+        </div>`).join('') : '<p class="text-sm text-slate-400">まだ登録がありません</p>'}
+      </div>
+    </section>
+
+    <section id="embed-tester" class="bg-white rounded-xl shadow p-4 space-y-3">
+      <h3 class="font-bold text-sm text-brand-navy">埋め込みテスター</h3>
+      <p class="text-xs text-slate-500">投稿文を貼ると、検出されるリンクと埋め込み後の本文をプレビューできます。</p>
+      <textarea id="embed-text" rows="4" class="w-full border border-slate-300 rounded-lg p-3 text-sm" placeholder="例: AIナレーションならElevenLabsが自然な印象です。動画編集はCapCutで十分でした。"></textarea>
+      <button id="embed-test-btn" class="bg-brand-orange text-white px-5 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-wand-magic-sparkles mr-1"></i>プレビュー</button>
+      <div id="embed-result"></div>
+    </section>
+
+    <section id="glossary-list" class="bg-white rounded-xl shadow p-4">
+      <h3 class="font-bold text-sm text-brand-navy mb-3"><i class="fas fa-book mr-1"></i>用語注釈辞書(${glossary.length}語)— Yutoが素人向け注釈に使用</h3>
+      <div class="grid sm:grid-cols-2 gap-2 text-xs">
+        ${glossary.map((g) => `<div class="border border-slate-100 rounded-lg p-2"><b class="text-brand-navy">${esc(g.term)}</b> — ${esc(g.annotation)}</div>`).join('')}
+      </div>
+    </section>
+  </div>`;
+
+  document.getElementById('af-add-btn').addEventListener('click', async () => {
+    const tool_name = document.getElementById('af-tool').value.trim();
+    const affiliate_url = document.getElementById('af-url').value.trim();
+    if (!tool_name || !affiliate_url) { toast('ツール名とURLは必須です', 'error'); return; }
+    const aliases = [tool_name, ...document.getElementById('af-aliases').value.split(',').map((s) => s.trim()).filter(Boolean)];
+    await axios.post('/api/affiliate/links', {
+      tool_name, affiliate_url, aliases,
+      program: document.getElementById('af-program').value.trim() || null,
+      note: document.getElementById('af-note').value.trim() || null
+    });
+    toast('リンクを登録しました。以後自動埋め込み対象になります');
+    renderAffiliate();
+  });
+  document.querySelectorAll('.af-toggle-btn').forEach((b) => b.addEventListener('click', async () => {
+    await axios.post(`/api/affiliate/links/${b.dataset.id}/toggle`); renderAffiliate();
+  }));
+  document.querySelectorAll('.af-delete-btn').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('削除しますか?')) return;
+    await axios.post(`/api/affiliate/links/${b.dataset.id}/delete`); toast('削除しました'); renderAffiliate();
+  }));
+  document.getElementById('embed-test-btn').addEventListener('click', async () => {
+    const text = document.getElementById('embed-text').value.trim();
+    if (!text) { toast('本文を入力してください', 'error'); return; }
+    const { data } = await axios.post('/api/affiliate/embed', { text });
+    const box = document.getElementById('embed-result');
+    if (!data.changed) {
+      box.innerHTML = '<div class="fade-in bg-slate-50 rounded-lg p-3 text-sm text-slate-500">検出されたツール名はありませんでした</div>';
+      return;
+    }
+    box.innerHTML = `
+    <div class="fade-in space-y-2">
+      <div class="text-xs text-emerald-700 font-bold"><i class="fas fa-check mr-1"></i>検出: ${data.detected.map((d) => `${esc(d.tool_name)}(「${esc(d.matched)}」にマッチ)`).join(' / ')}${data.pr_added ? ' + PR表記を自動追加' : ''}</div>
+      <div class="bg-slate-50 border border-slate-200 rounded-lg p-3">
+        <div class="text-[10px] text-slate-400 mb-1">埋め込み後の本文:</div>
+        <pre class="whitespace-pre-wrap text-sm font-sans">${esc(data.embedded)}</pre>
+      </div>
+    </div>`;
+  });
+}
+
 /* ============ ルーティング ============ */
 function navigate(view) {
   currentView = view;
@@ -458,6 +580,7 @@ function navigate(view) {
   else if (view === 'approve') renderApprove();
   else if (view === 'kpi') renderKPI();
   else if (view === 'qa') renderQA();
+  else if (view === 'affiliate') renderAffiliate();
 }
 window.navigate = navigate;
 

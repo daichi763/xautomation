@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { runQaCheck, FORBIDDEN_RULES } from './qa-rules'
+import { embedAffiliateLinks, suggestAnnotations, type AffiliateLink, type GlossaryEntry } from './affiliate'
 
 type Bindings = {
   DB: D1Database
@@ -180,6 +181,82 @@ app.post('/api/qa/check', async (c) => {
 app.get('/api/qa/rules', (c) => c.json(FORBIDDEN_RULES))
 
 // ============================================================
+// アフィリエイトリンク管理 + 自動埋め込み
+// ============================================================
+
+// 登録済みリンク一覧
+app.get('/api/affiliate/links', async (c) => {
+  const { DB } = c.env
+  const rows = await DB.prepare('SELECT * FROM affiliate_links ORDER BY created_at DESC').all()
+  return c.json({ links: rows.results })
+})
+
+// リンク登録(取締役がASP提携後に1回だけ)
+app.post('/api/affiliate/links', async (c) => {
+  const { DB } = c.env
+  const { tool_name, aliases, affiliate_url, program, note } = await c.req.json()
+  if (!tool_name || !affiliate_url) return c.json({ error: 'tool_name と affiliate_url は必須です' }, 400)
+  const id = 'af-' + Date.now().toString(36)
+  const aliasJson = JSON.stringify(Array.isArray(aliases) && aliases.length ? aliases : [tool_name])
+  await DB.prepare('INSERT INTO affiliate_links (link_id, tool_name, aliases, affiliate_url, program, note) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(id, tool_name, aliasJson, affiliate_url, program ?? null, note ?? null).run()
+  return c.json({ ok: true, link_id: id })
+})
+
+// リンクの有効/停止切替・削除
+app.post('/api/affiliate/links/:id/toggle', async (c) => {
+  const { DB } = c.env
+  await c.env.DB.prepare("UPDATE affiliate_links SET status = CASE status WHEN 'active' THEN 'paused' ELSE 'active' END WHERE link_id = ?")
+    .bind(c.req.param('id')).run()
+  return c.json({ ok: true })
+})
+
+app.post('/api/affiliate/links/:id/delete', async (c) => {
+  await c.env.DB.prepare('DELETE FROM affiliate_links WHERE link_id = ?').bind(c.req.param('id')).run()
+  return c.json({ ok: true })
+})
+
+// 自動埋め込みプレビュー(テキスト → 埋め込み後テキスト)
+app.post('/api/affiliate/embed', async (c) => {
+  const { DB } = c.env
+  const { text } = await c.req.json<{ text: string }>()
+  if (!text) return c.json({ error: 'text is required' }, 400)
+  const links = (await DB.prepare('SELECT * FROM affiliate_links').all()).results as unknown as AffiliateLink[]
+  const result = embedAffiliateLinks(text, links)
+  return c.json(result)
+})
+
+// 指定投稿にアフィリンクを自動埋め込み(承認画面から実行)
+app.post('/api/posts/:id/embed-affiliate', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const post = await DB.prepare('SELECT * FROM x_posts WHERE post_id = ?').bind(id).first<any>()
+  if (!post) return c.notFound()
+  const links = (await DB.prepare('SELECT * FROM affiliate_links').all()).results as unknown as AffiliateLink[]
+  const result = embedAffiliateLinks(post.body, links)
+  if (!result.changed) return c.json({ ok: false, message: '埋め込み対象のツール名が見つかりませんでした', result })
+  // 埋め込み後に再QA(PR表記が付くので needs_fix が解消されるケースあり)
+  const qa = runQaCheck(result.embedded, true)
+  await DB.prepare('UPDATE x_posts SET body = ?, qa_status = ?, qa_issues = ? WHERE post_id = ?')
+    .bind(result.embedded, qa.status, JSON.stringify(qa.issues), id).run()
+  return c.json({ ok: true, result, qa })
+})
+
+// 用語注釈サジェスト(素人向け注釈チェック)
+app.post('/api/glossary/suggest', async (c) => {
+  const { DB } = c.env
+  const { text } = await c.req.json<{ text: string }>()
+  if (!text) return c.json({ error: 'text is required' }, 400)
+  const glossary = (await DB.prepare('SELECT * FROM glossary').all()).results as unknown as GlossaryEntry[]
+  return c.json({ suggestions: suggestAnnotations(text, glossary) })
+})
+
+app.get('/api/glossary', async (c) => {
+  const rows = await c.env.DB.prepare('SELECT * FROM glossary ORDER BY term').all()
+  return c.json({ glossary: rows.results })
+})
+
+// ============================================================
 // シミュレーション: ワーカー活動の擬似進行(デモ用)
 // 本番では Cron Triggers + LLM API がこの役割を担う
 // ============================================================
@@ -257,6 +334,7 @@ app.get('/', (c) => {
         <button data-view="approve" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-check-double mr-1"></i>承認<span id="approval-badge" class="hidden ml-1 bg-brand-orange text-white text-xs px-1.5 py-0.5 rounded-full"></span></button>
         <button data-view="kpi" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-chart-line mr-1"></i>KPI</button>
         <button data-view="qa" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-shield-halved mr-1"></i>QAチェック</button>
+        <button data-view="affiliate" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-link mr-1"></i>アフィリンク</button>
       </nav>
     </div>
   </header>

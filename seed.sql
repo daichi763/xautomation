@@ -21,34 +21,58 @@ INSERT OR IGNORE INTO topic_candidates (topic_id, title_ja, appeal_axis, target_
   ('t-007', 'Print on Demand × AIデザインの最新ワークフロー', '["貧乏人=希望","子供=夢"]', 'note_paid', '["https://reddit.com/r/PrintOnDemand/example"]', '実践手順を画像付きで解説できる', 'medium', 'pending');
 
 -- 明日のX投稿12本(承認待ちサンプル)
+-- 構成方針:
+--  ・固有名詞には必ず1行注釈(素人でも読める)
+--  ・枠5/9/12は「普遍的なお金ネタ」でリプ誘発(専門知識ゼロでも答えられる質問)
 INSERT OR IGNORE INTO x_posts (post_id, topic_id, slot_number, scheduled_at, body, image_urls, approval_status, qa_status) VALUES
   ('p-001', 't-001', 1, datetime('now', '+1 day', 'start of day', '+6 hours', '+30 minutes'),
-   '【海外速報】RedditのKDPスレで月$3,000達成の報告が話題です。' || char(10) || '要点3つ:' || char(10) || '・ニッチ特化のローコンテンツ本' || char(10) || '・表紙はAI生成で外注ゼロ' || char(10) || '・出版数は月40冊ペース' || char(10) || '日本のKindleで再現できるか、僕も検証してみます。' || char(10) || '出典→ reddit.com/r/KDP' || char(10) || '#海外副業 #AI副業', NULL, 'pending', 'ok'),
+   '【海外速報】アメリカの掲示板で「Kindle出版で月45万円」の報告が話題です。' || char(10) || char(10) || '※KDP=Amazonで誰でも無料で電子書籍を出せる仕組みです' || char(10) || char(10) || '・文章をほぼ書かない「記入式ノート本」' || char(10) || '・表紙はAIに作らせて外注費ゼロ' || char(10) || '・月40冊ペースで量産' || char(10) || char(10) || '日本のAmazonでも再現できるか、僕も検証してみます。' || char(10) || '出典→ reddit.com/r/KDP' || char(10) || '#海外副業 #AI副業', NULL, 'pending', 'ok'),
   ('p-002', NULL, 2, datetime('now', '+1 day', 'start of day', '+7 hours', '+30 minutes'),
-   '今日はKDP新手法の深掘りと、ElevenLabs新機能の検証結果を出します。11時のスレッドは保存推奨の内容になりそうです👇', NULL, 'pending', 'ok'),
+   '今日の予定です。' || char(10) || '午前: Kindle出版の新手法を分解(11時にスレッドで)' || char(10) || '夜: AI音声ツールの料金比較' || char(10) || char(10) || '「本を書かずに出版で稼ぐ」って意味不明ですよね。僕も最初そう思いました。11時に種明かしします👇', NULL, 'pending', 'ok'),
   ('p-003', 't-002', 3, datetime('now', '+1 day', 'start of day', '+9 hours'),
-   'Faceless動画の音声コスト、ElevenLabsの新プランでここまで下がりました。図解にまとめたので見てください。' || char(10) || '#AI副業', '["placeholder_zukai_1.png"]', 'pending', 'ok'),
+   '顔出しなしのYouTube動画、実は「AIナレーション」で作られてるものが増えています。' || char(10) || char(10) || '※ElevenLabs=文章を入れると人間そっくりの音声を作ってくれるサービスです' || char(10) || char(10) || '料金が下がって1本あたり数十円になった計算を図解にしました。' || char(10) || '#AI副業', '["placeholder_zukai_1.png"]', 'pending', 'ok'),
   ('p-004', 't-001', 4, datetime('now', '+1 day', 'start of day', '+11 hours'),
-   '海外のKDP事情、正直ここまで来てるとは思いませんでした。' || char(10) || '月$3,000を「本を書かずに」達成した方法、全部分解します👇' || char(10) || '(スレッド 2〜8本目は詳細画面で確認)', NULL, 'pending', 'ok'),
+   '「本を書かずにKindle出版で月45万円」' || char(10) || char(10) || '怪しく聞こえますよね。でも仕組みを分解したら、意外と地道な作業の積み重ねでした。' || char(10) || char(10) || '知識ゼロの人向けに、用語の説明から全部やります👇' || char(10) || '(スレッド 2〜8本目は詳細画面で確認)', NULL, 'pending', 'ok'),
   ('p-005', NULL, 5, datetime('now', '+1 day', 'start of day', '+12 hours', '+15 minutes'),
-   '昼休みTips: ChatGPTのプロンプト、英語圏では「役割+制約+出力形式」の3点セットが定番化してる印象です。日本語でも同じ構造が効きます。', NULL, 'pending', 'ok'),
+   '【昼休みの質問】' || char(10) || 'もし今、月に3万円の副収入があったら何に使いますか?' || char(10) || char(10) || '僕は迷わず検証費用に回しちゃうんですが、家族がいたら違う答えになるんだろうなと思ってます。', NULL, 'pending', 'ok'),
   ('p-006', NULL, 6, datetime('now', '+1 day', 'start of day', '+14 hours'),
-   '(引用RT)この視点は日本だとまだ少ないですね。海外では「作る前に売る」が完全に定着してるっぽい。', NULL, 'pending', 'ok'),
+   '(引用RT)この「作る前に売る」という考え方、日本だとまだ少ない印象です。' || char(10) || char(10) || '要するに「商品を完成させる前に予約を取って、売れると確認できてから作る」やり方。在庫リスクがゼロになります。', NULL, 'pending', 'ok'),
   ('p-007', 't-004', 7, datetime('now', '+1 day', 'start of day', '+16 hours'),
-   'Indie Hackersで見つけたAIエージェント受託の事例。個人で月$8k、稼働は週20時間とのこと。単価設定の考え方が日本と根本的に違う印象です。詳細を分解します。', NULL, 'pending', 'ok'),
+   '海外の個人開発者が「AIエージェント制作の代行」で月120万円稼いでいる事例を見つけました。' || char(10) || char(10) || '※AIエージェント=問い合わせ対応などを自動でこなすAIの仕組み。中小企業への導入代行が仕事になっています' || char(10) || char(10) || '稼働は週20時間。単価の考え方が日本と根本的に違う印象です。明日詳しく分解します。', NULL, 'pending', 'ok'),
   ('p-008', NULL, 8, datetime('now', '+1 day', 'start of day', '+18 hours'),
-   'AI音声ツール3つを同条件で比較しました。結論、日本語品質ならA、コスパならB、速度ならCという住み分けな印象。詳細は画像で。' || char(10) || '#PR(アフィリエイトリンクを含みます)', NULL, 'pending', 'needs_fix'),
+   'AIナレーション作成ツール3つを同じ文章で比較しました。' || char(10) || char(10) || '・日本語の自然さ重視 → ElevenLabs' || char(10) || '・とにかく安く → VOICEVOX(無料)' || char(10) || '・動画編集とセットで → CapCut' || char(10) || char(10) || '初めてなら無料のVOICEVOXから触るのがおすすめっぽいです。詳細は画像で。' || char(10) || '#PR(アフィリエイトリンクを含みます)', NULL, 'pending', 'needs_fix'),
   ('p-009', NULL, 9, datetime('now', '+1 day', 'start of day', '+19 hours', '+30 minutes'),
-   'みなさんは副業の情報収集、どこでやってますか?僕はRedditとYouTubeが中心なんですが、他に良いソースあれば教えてください。', NULL, 'pending', 'ok'),
+   '【正直な質問】' || char(10) || '副業を始めない理由って、結局どれが一番大きいですか?' || char(10) || char(10) || '① 時間がない' || char(10) || '② 何から始めればいいかわからない' || char(10) || '③ 失敗が怖い' || char(10) || '④ そもそも会社にバレたくない' || char(10) || char(10) || '僕は最初②でした。リプで教えてもらえると今後の発信の参考になります。', NULL, 'pending', 'ok'),
   ('p-010', NULL, 10, datetime('now', '+1 day', 'start of day', '+21 hours'),
-   '今週の失敗談: Etsyのデジタル商品、リサーチ不足で出品3日ゼロ売上でした。ニッチ選定を飛ばすとこうなるという実例です。来週は選定からやり直します。', NULL, 'pending', 'ok'),
+   '今週の失敗談です。' || char(10) || char(10) || 'Etsy(海外版ミンネのようなハンドメイド・素材の販売サイト)にデジタル素材を出品したんですが、3日間で売上ゼロでした。' || char(10) || char(10) || '原因はシンプルで、「何が売れてるか」を調べずに出したから。リサーチを飛ばすとこうなる、という実例でした。来週やり直します。', NULL, 'pending', 'ok'),
   ('p-011', NULL, 11, datetime('now', '+1 day', 'start of day', '+22 hours', '+30 minutes'),
-   'KDP新手法の完全版、noteにまとめました。無料部分だけでも全体像はつかめるようにしてあります。' || char(10) || 'note.com/m_fukugyou', NULL, 'pending', 'ok'),
+   '今朝話したKindle出版の新手法、専門用語を全部かみ砕いた完全版をnoteにまとめました。' || char(10) || char(10) || '無料部分だけでも「仕組みの全体像」はつかめるようにしてあります。' || char(10) || 'note.com/m_fukugyou', NULL, 'pending', 'ok'),
   ('p-012', NULL, 12, datetime('now', '+1 day', 'start of day', '+23 hours', '+30 minutes'),
-   '今日も1日お疲れさまでした。海外の事例を見てると「小さく試して数字で判断」が徹底されてるなと感じます。僕も明日また1つ検証します。おやすみなさい。', NULL, 'pending', 'ok');
+   '今日も1日お疲れさまでした。' || char(10) || char(10) || 'ふと思うんですが、「貯金が1年増えてない」って気づいた時が、一番行動のエネルギーになる気がします。僕が副業を始めたきっかけもそれでした。' || char(10) || char(10) || 'みなさんのきっかけは何でしたか?おやすみなさい。', NULL, 'pending', 'ok');
 
--- QA指摘サンプル(枠8に要修正)
-UPDATE x_posts SET qa_issues = '[{"rule":"ステマ規制","detail":"アフィリンク付き投稿の画像にPR表記が必要です。画像未添付のため、Akiに画像生成を依頼してください。","severity":"needs_fix"}]' WHERE post_id = 'p-008';
+-- アフィリエイトリンク(取締役がASP提携後に1回登録 → 以後自動埋め込み)
+INSERT OR REPLACE INTO affiliate_links (link_id, tool_name, aliases, affiliate_url, program, note, status, auto_embed) VALUES
+  ('af-001', 'ElevenLabs', '["ElevenLabs","イレブンラボ","elevenlabs"]', 'https://elevenlabs.io/?from=partnerexample', '公式アフィリエイト(要提携申請)', '報酬: 初年度22%(例)。URLは提携承認後に差し替えてください', 'active', 1),
+  ('af-002', 'CapCut', '["CapCut","キャップカット","capcut"]', 'https://www.capcut.com/?ref=example', '公式パートナー(要申請)', 'URLは提携承認後に差し替えてください', 'active', 1),
+  ('af-003', 'ConoHa WING', '["ConoHa","コノハウィング"]', 'https://px.a8.net/svt/ejp?a8mat=EXAMPLE', 'A8.net(要提携申請)', 'ブログ開設ネタ用。URLは提携承認後に差し替え', 'paused', 1);
+
+-- 用語注釈辞書(Yuto/QAが素人向け注釈に使用)
+INSERT OR REPLACE INTO glossary (term, annotation, category) VALUES
+  ('KDP', 'Amazonで誰でも無料で電子書籍を出版できる仕組み(Kindle Direct Publishing)', 'service'),
+  ('ElevenLabs', '文章を入れると人間そっくりの音声を作ってくれるAIサービス', 'service'),
+  ('VOICEVOX', '無料で使える日本語のAI音声読み上げソフト', 'service'),
+  ('CapCut', 'スマホでもPCでも使える無料の動画編集アプリ', 'service'),
+  ('Etsy', '海外版ミンネのようなハンドメイド作品・デジタル素材の販売サイト', 'platform'),
+  ('Reddit', 'アメリカ最大級の掲示板サイト。副業やAIの一次情報の宝庫', 'platform'),
+  ('Faceless動画', '顔出しせずナレーションと画面素材だけで作るYouTube動画', 'term'),
+  ('AIエージェント', '問い合わせ対応などの作業を自動でこなしてくれるAIの仕組み', 'term'),
+  ('Indie Hackers', '海外の個人開発者が収益を公開し合うコミュニティサイト', 'platform'),
+  ('ローコンテンツ本', '日記帳や記入式ノートなど、文章をほとんど書かずに作れる本', 'term'),
+  ('ASP', 'アフィリエイトの広告を仲介する会社(A8.netなど)', 'term'),
+  ('KPI', '目標の達成度を測る数字(フォロワー数・売上など)', 'term');
+
+-- QA指摘サンプル(枠8に要修正: アフィリンク自動埋め込みで解決可能)
+UPDATE x_posts SET qa_issues = '[{"rule":"ステマ規制","detail":"アフィリエイトリンクとPR表記が未設定です。「アフィリンクを自動埋め込み」ボタンで解決できます。","severity":"needs_fix"}]' WHERE post_id = 'p-008';
 
 -- note記事サンプル
 INSERT OR IGNORE INTO note_articles (article_id, topic_id, title, type, price_yen, body_md, paywall_position, approval_status, qa_status, view_count, sales_count, revenue_yen) VALUES
