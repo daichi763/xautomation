@@ -43,7 +43,7 @@ async function collectKpiFacts(db: D1Database, days: number): Promise<string> {
   // 投稿別パフォーマンス(公開済み・直近)
   const postRows = await db
     .prepare(
-      `SELECT slot_number, substr(body, 1, 60) AS body_head, impressions, likes, retweets, replies, date(published_at) AS pub_date
+      `SELECT slot_number, substr(body, 1, 60) AS body_head, impressions, engagements, date(published_at) AS pub_date
        FROM x_posts WHERE published_at IS NOT NULL AND published_at > datetime('now', ?)
        ORDER BY impressions DESC LIMIT 20`,
     )
@@ -54,7 +54,7 @@ async function collectKpiFacts(db: D1Database, days: number): Promise<string> {
   // 枠別平均
   const slotRows = await db
     .prepare(
-      `SELECT slot_number, COUNT(*) AS n, AVG(impressions) AS avg_imp, AVG(likes) AS avg_likes
+      `SELECT slot_number, COUNT(*) AS n, AVG(impressions) AS avg_imp, AVG(engagements) AS avg_eng
        FROM x_posts WHERE published_at IS NOT NULL AND published_at > datetime('now', ?)
        GROUP BY slot_number ORDER BY avg_imp DESC`,
     )
@@ -75,10 +75,10 @@ async function collectKpiFacts(db: D1Database, days: number): Promise<string> {
     ? kpis.map((k) => `${k.date}: フォロワー${k.x_followers} / imp${k.x_impressions_total} / eng${k.x_engagements_total} / note販売${k.note_paid_sales} / アフィ収益${k.affiliate_revenue}円`).join('\n')
     : '(KPIデータなし)'
   const postText = posts.length
-    ? posts.map((p) => `[枠${p.slot_number}|${p.pub_date}] imp${p.impressions} like${p.likes} rt${p.retweets}: ${p.body_head}…`).join('\n')
+    ? posts.map((p) => `[枠${p.slot_number}|${p.pub_date}] imp${p.impressions} eng${p.engagements}: ${p.body_head}…`).join('\n')
     : '(公開済み投稿の実績データなし — X API未接続のため計測値は未取得)'
   const slotText = slots.length
-    ? slots.map((s) => `枠${s.slot_number}: ${s.n}本 / 平均imp${Math.round(s.avg_imp)} / 平均like${(s.avg_likes || 0).toFixed(1)}`).join('\n')
+    ? slots.map((s) => `枠${s.slot_number}: ${s.n}本 / 平均imp${Math.round(s.avg_imp)} / 平均eng${(s.avg_eng || 0).toFixed(1)}`).join('\n')
     : '(枠別データなし)'
   const noteText = notes.length
     ? notes.map((n) => `[${n.type}|${n.pub_date}] ${n.title}: view${n.view_count} 売上${n.sales_count}件/${n.revenue_yen}円`).join('\n')

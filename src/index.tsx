@@ -693,6 +693,13 @@ app.post('/api/reports/daily/run', async (c) => {
   return c.json(result, result.ok ? 200 : 502)
 })
 
+// Rui日次分析を手動実行(デバッグ/即時確認用)
+app.post('/api/reports/analysis/run', async (c) => {
+  const { runRuiDaily } = await import('./rui')
+  const result = await runRuiDaily(c.env.DB, c.env.OPENAI_API_KEY || '')
+  return c.json(result, result.ok ? 200 : 502)
+})
+
 // ============================================================
 // フロントエンド(SPA)
 // ============================================================
