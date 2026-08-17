@@ -182,14 +182,18 @@ async function openWorkerModal(name) {
 
 /* ============ 承認ビュー ============ */
 async function renderApprove() {
-  const [postsRes, topicsRes, notesRes] = await Promise.all([
+  let xStatus = { connected: false };
+  const [postsRes, topicsRes, notesRes, approvedRes] = await Promise.all([
     axios.get('/api/posts?status=pending'),
     axios.get('/api/topics?status=pending'),
-    axios.get('/api/notes')
+    axios.get('/api/notes'),
+    axios.get('/api/posts?status=approved')
   ]);
+  try { xStatus = (await axios.get('/api/x/status')).data; } catch (e) {}
   const posts = postsRes.data.posts;
   const topics = topicsRes.data.topics;
   const notes = notesRes.data.articles.filter((a) => a.approval_status === 'pending');
+  const approvedPosts = (approvedRes.data.posts || []).filter((p) => !p.published_at);
 
   $app.innerHTML = `
   <div class="fade-in space-y-8">
@@ -213,7 +217,58 @@ async function renderApprove() {
       ${notes.length ? notes.map(noteCard).join('')
         : '<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">公開待ちのnote記事はありません</p>'}
     </section>
+
+    <section id="publish-x">
+      <div class="flex items-center gap-2 mb-3 flex-wrap">
+        <h2 class="font-bold text-lg text-brand-navy"><i class="fab fa-x-twitter mr-2"></i>承認済み → Xへ投稿(${approvedPosts.length}本)</h2>
+        <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs ${xStatus.connected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}">
+          <span class="w-2 h-2 rounded-full ${xStatus.connected ? 'bg-emerald-500' : 'bg-slate-400'}"></span>
+          X API ${xStatus.connected ? '接続中' : '未接続'}
+        </span>
+      </div>
+      ${!xStatus.connected ? `<div class="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-slate-700 mb-3">
+        <p class="font-bold text-brand-navy mb-1"><i class="fas fa-circle-info mr-1"></i>X API未接続のため、現在は「コピーして投稿」の半自動運用です</p>
+        <p class="text-xs">完全自動化には <a href="https://developer.x.com" target="_blank" class="text-blue-600 underline">developer.x.com</a> でアプリ登録し、4つのキー(API Key/Secret、Access Token/Secret)をシークレット登録してください。</p>
+      </div>` : ''}
+      ${approvedPosts.length ? `<div class="grid md:grid-cols-2 gap-3">${approvedPosts.map((p) => `
+      <article class="bg-white rounded-xl shadow p-4 flex flex-col gap-2">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold text-brand-navy bg-slate-100 px-2 py-1 rounded">枠${p.slot_number} ${SLOT_TIMES[p.slot_number]}</span>
+          ${qaBadge(p.qa_status, p.qa_issues)}
+        </div>
+        <p class="text-sm whitespace-pre-wrap leading-relaxed flex-1">${esc(p.body)}</p>
+        <div class="flex gap-2 pt-1">
+          <button class="copy-post-btn flex-1 bg-slate-100 text-slate-700 py-1.5 rounded-lg text-xs font-bold hover:bg-slate-200" data-body="${esc(p.body).replace(/"/g, '&quot;')}"><i class="fas fa-copy mr-1"></i>コピーして投稿</button>
+          ${xStatus.connected ? `<button class="publish-x-btn flex-1 bg-black text-white py-1.5 rounded-lg text-xs font-bold hover:opacity-80" data-id="${esc(p.post_id)}"><i class="fab fa-x-twitter mr-1"></i>Xへ自動投稿</button>` : ''}
+        </div>
+      </article>`).join('')}</div>`
+        : '<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">X投稿待ちの承認済み投稿はありません</p>'}
+    </section>
   </div>`;
+
+  document.querySelectorAll('.copy-post-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(btn.dataset.body);
+      toast('コピーしました。Xアプリに貼り付けて投稿してください');
+      window.open('https://x.com/compose/post', '_blank');
+    });
+  });
+
+  document.querySelectorAll('.publish-x-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('この投稿を今すぐXに公開します。よろしいですか？')) return;
+      btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>投稿中...';
+      try {
+        const { data } = await axios.post(`/api/posts/${btn.dataset.id}/publish-x`, {}, { timeout: 60000 });
+        toast(`Xへ投稿しました${data.with_image ? '(画像付き)' : ''}`);
+        window.open(data.tweet_url, '_blank');
+        renderApprove();
+      } catch (e) {
+        toast(e.response?.data?.error || '投稿に失敗しました', 'error');
+        btn.disabled = false; btn.innerHTML = '<i class="fab fa-x-twitter mr-1"></i>Xへ自動投稿';
+      }
+    });
+  });
 
   document.getElementById('approve-all-btn')?.addEventListener('click', async () => {
     const { data } = await axios.post('/api/posts/approve-all');
@@ -682,6 +737,109 @@ async function renderAffiliate() {
   });
 }
 
+/* ============ Aki画像スタジオ ============ */
+async function renderImages() {
+  let llmStatus = { connected: false };
+  try { llmStatus = (await axios.get('/api/llm/status')).data; } catch (e) {}
+  const { data } = await axios.get('/api/images');
+  const images = data.images || [];
+
+  const imgQaBadge = (s) => {
+    if (s === 'ok') return '<span class="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-bold"><i class="fas fa-shield-halved mr-1"></i>QA通過</span>';
+    if (s === 'needs_fix') return '<span class="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-bold"><i class="fas fa-triangle-exclamation mr-1"></i>要修正</span>';
+    if (s === 'ng') return '<span class="text-[10px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-bold">NG</span>';
+    return '<span class="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold">未審査</span>';
+  };
+
+  $app.innerHTML = `
+  <div class="fade-in max-w-5xl mx-auto space-y-6">
+    <h2 class="font-bold text-lg text-brand-navy"><i class="fas fa-image mr-2"></i>Aki 画像スタジオ <span class="text-[10px] font-normal text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200">gpt-image-2</span></h2>
+    <p class="text-sm text-slate-500">タイトルを入れるとAkiがブランドガイド(ネイビー×オレンジ)準拠の投稿用画像を生成。生成後はMio(GPT-5)が画像内の誤字・法令リスク・権利リスクを自動審査します。1枚あたり約$0.05〜0.10(画像生成+QA)。</p>
+
+    <section id="image-generator" class="bg-white rounded-xl shadow p-4 space-y-3 border-2 border-brand-orange/30">
+      <div class="grid sm:grid-cols-3 gap-3">
+        <input id="img-title" class="sm:col-span-2 border border-slate-300 rounded-lg p-2.5 text-sm" placeholder="画像内テキスト(例: AI副業 検証レポート)">
+        <select id="img-purpose" class="border border-slate-300 rounded-lg p-2 text-sm">
+          <option value="thumbnail">X用サムネ(横長)</option>
+          <option value="infographic">図解(縦長)</option>
+          <option value="note_cover">noteアイキャッチ</option>
+        </select>
+      </div>
+      <input id="img-extra" class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" placeholder="追加指定(任意。例: グラフ要素を入れる)">
+      <button id="img-gen-btn" class="bg-brand-orange text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:opacity-90" ${llmStatus.connected ? '' : 'disabled'}><i class="fas fa-wand-magic-sparkles mr-1"></i>Akiに生成させる(自動でMio審査)</button>
+      <div id="img-gen-result"></div>
+    </section>
+
+    <section id="image-gallery" class="bg-white rounded-xl shadow p-4">
+      <h3 class="font-bold text-sm text-brand-navy mb-3">生成済み画像(${images.length}件)</h3>
+      ${images.length ? `<div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+        ${images.map((img) => {
+          let issues = [];
+          try { issues = JSON.parse(img.qa_issues || '[]'); } catch (e) {}
+          return `
+          <figure class="image-card border border-slate-200 rounded-lg overflow-hidden flex flex-col">
+            <img src="/api/images/${esc(img.image_id)}/file" alt="${esc(img.title_text || '')}" class="w-full aspect-video object-cover bg-slate-100" loading="lazy">
+            <figcaption class="p-2 space-y-1 flex-1 flex flex-col">
+              <div class="flex items-center justify-between gap-1">
+                ${imgQaBadge(img.qa_status)}
+                <span class="text-[10px] text-slate-400">$${(img.cost_usd || 0).toFixed(3)}</span>
+              </div>
+              <div class="text-xs font-bold truncate">${esc(img.title_text || '')}</div>
+              ${issues.length ? `<div class="text-[10px] text-amber-700 bg-amber-50 rounded p-1">${issues.map((i) => esc(i.detail || '')).join('<br>')}</div>` : ''}
+              <div class="flex gap-1 mt-auto pt-1">
+                <button class="img-reqa-btn flex-1 bg-blue-50 text-blue-700 border border-blue-200 py-1 rounded text-[10px] font-bold hover:bg-blue-100" data-id="${esc(img.image_id)}"><i class="fas fa-brain mr-0.5"></i>再審査</button>
+                <button class="img-del-btn flex-1 bg-slate-100 text-slate-500 py-1 rounded text-[10px] font-bold hover:bg-red-50 hover:text-red-600" data-id="${esc(img.image_id)}"><i class="fas fa-trash mr-0.5"></i>削除</button>
+              </div>
+            </figcaption>
+          </figure>`;
+        }).join('')}
+      </div>` : '<p class="text-sm text-slate-400 text-center py-6">まだ画像がありません。上のフォームから生成してください。</p>'}
+    </section>
+  </div>`;
+
+  document.getElementById('img-gen-btn').addEventListener('click', async () => {
+    const title = document.getElementById('img-title').value.trim();
+    if (!title) { toast('画像内テキストを入力してください', 'error'); return; }
+    const btn = document.getElementById('img-gen-btn');
+    const box = document.getElementById('img-gen-result');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Akiが生成中→Mioが審査中...(30〜90秒)';
+    try {
+      const { data: d } = await axios.post('/api/images/generate', {
+        purpose: document.getElementById('img-purpose').value,
+        title,
+        extra: document.getElementById('img-extra').value.trim() || undefined,
+      }, { timeout: 180000 });
+      toast(`生成完了 (QA: ${d.qa.verdict})`);
+      renderImages();
+    } catch (e) {
+      box.innerHTML = `<div class="mt-2 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">エラー: ${esc(e.response?.data?.error || e.message)}</div>`;
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-wand-magic-sparkles mr-1"></i>Akiに生成させる(自動でMio審査)';
+    }
+  });
+
+  document.querySelectorAll('.img-reqa-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+      try {
+        const { data: d } = await axios.post(`/api/images/${btn.dataset.id}/qa`, {}, { timeout: 120000 });
+        toast(`Mio審査完了: ${d.verdict}${d.summary ? ' — ' + d.summary : ''}`);
+        renderImages();
+      } catch (e) {
+        toast(e.response?.data?.error || '審査に失敗しました', 'error');
+        btn.disabled = false; btn.innerHTML = '<i class="fas fa-brain mr-0.5"></i>再審査';
+      }
+    });
+  });
+
+  document.querySelectorAll('.img-del-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await axios.delete(`/api/images/${btn.dataset.id}`);
+      toast('削除しました');
+      renderImages();
+    });
+  });
+}
+
 /* ============ AIコスト可視化 ============ */
 let costChart = null;
 async function renderCost() {
@@ -842,6 +1000,7 @@ function navigate(view) {
   else if (view === 'qa') renderQA();
   else if (view === 'affiliate') renderAffiliate();
   else if (view === 'cost') renderCost();
+  else if (view === 'images') renderImages();
 }
 window.navigate = navigate;
 

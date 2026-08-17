@@ -4,10 +4,17 @@ import { runQaCheck, FORBIDDEN_RULES } from './qa-rules'
 import { embedAffiliateLinks, suggestAnnotations, type AffiliateLink, type GlossaryEntry } from './affiliate'
 import { computeCostPlan } from './model-plan'
 import { callOpenAI, YUTO_SYSTEM, MIO_SYSTEM } from './llm'
+import { buildImagePrompt, generateImage, qaImage, IMAGE_SIZE, IMAGE_COST_USD, type ImagePurpose } from './image-gen'
+import { getXCredentials, postTweet, uploadMedia } from './x-api'
 
 type Bindings = {
   DB: D1Database
+  R2: R2Bucket
   OPENAI_API_KEY?: string
+  X_API_KEY?: string
+  X_API_SECRET?: string
+  X_ACCESS_TOKEN?: string
+  X_ACCESS_TOKEN_SECRET?: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -196,7 +203,7 @@ app.post('/api/llm/write', async (c) => {
     await DB.prepare(
       "INSERT INTO x_posts (post_id, slot_number, scheduled_at, body, approval_status, qa_status, qa_issues) VALUES (?, ?, datetime('now', '+1 day'), ?, 'pending', ?, ?)"
     ).bind(savedPostId, slot || 1, result.content, qa.status, JSON.stringify(qa.issues)).run()
-    await DB.prepare("INSERT INTO worker_logs (worker_name, action, detail) VALUES ('yuto', 'llm_write', ?)")
+    await DB.prepare("INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('yuto', 'llm_write', 'success', ?, CURRENT_TIMESTAMP)")
       .bind(`OpenAI(gpt-5)で執筆: ${theme.slice(0, 40)}`).run()
   }
 
@@ -236,6 +243,154 @@ app.post('/api/llm/qa', async (c) => {
   })
 })
 
+// ============================================================
+// Aki: 画像生成 (gpt-image-2 → R2保存) + Mio: 画像QA
+// ============================================================
+
+// 生成済み画像一覧
+app.get('/api/images', async (c) => {
+  const { DB } = c.env
+  const rows = await DB.prepare('SELECT * FROM generated_images ORDER BY created_at DESC LIMIT 50').all()
+  return c.json({ images: rows.results })
+})
+
+// R2から画像配信
+app.get('/api/images/:id/file', async (c) => {
+  const { DB, R2 } = c.env
+  const img: any = await DB.prepare('SELECT r2_key FROM generated_images WHERE image_id = ?').bind(c.req.param('id')).first()
+  if (!img) return c.notFound()
+  const obj = await R2.get(img.r2_key)
+  if (!obj) return c.notFound()
+  return new Response(obj.body, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' } })
+})
+
+// Akiに画像を生成させる → R2保存 → Mio画像QA自動実行
+app.post('/api/images/generate', async (c) => {
+  const { DB, R2 } = c.env
+  const { purpose, title, extra, post_id, skip_qa } = await c.req.json<{ purpose: ImagePurpose; title: string; extra?: string; post_id?: string; skip_qa?: boolean }>()
+  if (!title?.trim()) return c.json({ error: 'タイトルテキストを入力してください' }, 400)
+  const p: ImagePurpose = ['thumbnail', 'infographic', 'note_cover'].includes(purpose) ? purpose : 'thumbnail'
+
+  const prompt = buildImagePrompt(p, title, extra)
+  const gen = await generateImage(c.env.OPENAI_API_KEY || '', prompt, IMAGE_SIZE[p])
+  if (!gen.ok) return c.json({ error: gen.error }, 502)
+
+  // R2保存
+  const imageId = `img-${Date.now()}`
+  const r2Key = `images/${imageId}.png`
+  const binary = Uint8Array.from(atob(gen.b64!), (ch) => ch.charCodeAt(0))
+  await R2.put(r2Key, binary, { httpMetadata: { contentType: 'image/png' } })
+
+  // Mio画像QA (スキップ可)
+  let qa: any = { verdict: 'pending' }
+  let qaCost = 0
+  if (!skip_qa) {
+    const qaRes = await qaImage(c.env.OPENAI_API_KEY || '', gen.b64!, title)
+    if (qaRes.ok) {
+      qa = { verdict: qaRes.verdict, issues: qaRes.issues || [], summary: qaRes.summary, text_readable: qaRes.text_readable }
+      qaCost = qaRes.costUsd || 0
+    } else {
+      qa = { verdict: 'pending', error: qaRes.error }
+    }
+  }
+
+  const totalCost = IMAGE_COST_USD + qaCost
+  await DB.prepare(
+    'INSERT INTO generated_images (image_id, post_id, purpose, prompt, title_text, r2_key, model, qa_status, qa_issues, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(imageId, post_id || null, p, prompt, title, r2Key, 'gpt-image-2', qa.verdict === 'unknown' ? 'pending' : qa.verdict, JSON.stringify(qa.issues || []), totalCost).run()
+
+  await DB.prepare("INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('aki', 'image_generate', 'success', ?, CURRENT_TIMESTAMP)")
+    .bind(`gpt-image-2で生成: ${title.slice(0, 40)} (QA: ${qa.verdict})`).run()
+
+  return c.json({ image_id: imageId, url: `/api/images/${imageId}/file`, prompt, qa, costUsd: totalCost })
+})
+
+// 既存画像のMio QA再実行
+app.post('/api/images/:id/qa', async (c) => {
+  const { DB, R2 } = c.env
+  const id = c.req.param('id')
+  const img: any = await DB.prepare('SELECT * FROM generated_images WHERE image_id = ?').bind(id).first()
+  if (!img) return c.json({ error: 'not found' }, 404)
+  const obj = await R2.get(img.r2_key)
+  if (!obj) return c.json({ error: '画像ファイルが見つかりません' }, 404)
+  const buf = await obj.arrayBuffer()
+  let b64 = ''
+  const bytes = new Uint8Array(buf)
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    b64 += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  b64 = btoa(b64)
+
+  const qaRes = await qaImage(c.env.OPENAI_API_KEY || '', b64, img.title_text || '')
+  if (!qaRes.ok) return c.json({ error: qaRes.error }, 502)
+
+  await DB.prepare('UPDATE generated_images SET qa_status = ?, qa_issues = ? WHERE image_id = ?')
+    .bind(qaRes.verdict === 'unknown' ? 'pending' : qaRes.verdict, JSON.stringify(qaRes.issues || []), id).run()
+  await DB.prepare("INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('mio', 'image_qa', 'success', ?, CURRENT_TIMESTAMP)")
+    .bind(`画像QA: ${id} → ${qaRes.verdict}`).run()
+
+  return c.json({ image_id: id, verdict: qaRes.verdict, issues: qaRes.issues || [], summary: qaRes.summary, text_readable: qaRes.text_readable, costUsd: qaRes.costUsd })
+})
+
+// 画像削除
+app.delete('/api/images/:id', async (c) => {
+  const { DB, R2 } = c.env
+  const id = c.req.param('id')
+  const img: any = await DB.prepare('SELECT r2_key FROM generated_images WHERE image_id = ?').bind(id).first()
+  if (img) await R2.delete(img.r2_key)
+  await DB.prepare('DELETE FROM generated_images WHERE image_id = ?').bind(id).run()
+  return c.json({ ok: true })
+})
+
+// ============================================================
+// X API 直接接続 (OAuth 1.0a)
+// ============================================================
+
+app.get('/api/x/status', (c) => {
+  const creds = getXCredentials(c.env as any)
+  return c.json({ connected: !!creds, required: ['X_API_KEY', 'X_API_SECRET', 'X_ACCESS_TOKEN', 'X_ACCESS_TOKEN_SECRET'] })
+})
+
+// 承認済み投稿をXへ即時投稿 (画像付き対応)
+app.post('/api/posts/:id/publish-x', async (c) => {
+  const { DB, R2 } = c.env
+  const id = c.req.param('id')
+  const creds = getXCredentials(c.env as any)
+  if (!creds) return c.json({ error: 'X APIキーが未設定です。X_API_KEY / X_API_SECRET / X_ACCESS_TOKEN / X_ACCESS_TOKEN_SECRET の4つのシークレット登録が必要です' }, 400)
+
+  const post: any = await DB.prepare('SELECT * FROM x_posts WHERE post_id = ?').bind(id).first()
+  if (!post) return c.json({ error: 'not found' }, 404)
+  if (post.approval_status !== 'approved') return c.json({ error: '承認済みの投稿のみ公開できます。先に承認してください' }, 400)
+  if (post.qa_status === 'ng') return c.json({ error: 'QA判定NGの投稿は公開できません' }, 400)
+  if (post.published_at) return c.json({ error: 'すでに公開済みです' }, 400)
+
+  // 紐付く画像があればアップロード (QA通過分のみ)
+  let mediaIds: string[] = []
+  const img: any = await DB.prepare("SELECT * FROM generated_images WHERE post_id = ? AND qa_status = 'ok' ORDER BY created_at DESC LIMIT 1").bind(id).first()
+  if (img) {
+    const obj = await R2.get(img.r2_key)
+    if (obj) {
+      const buf = await obj.arrayBuffer()
+      const bytes = new Uint8Array(buf)
+      let b64 = ''
+      const chunk = 0x8000
+      for (let i = 0; i < bytes.length; i += chunk) b64 += String.fromCharCode(...bytes.subarray(i, i + chunk))
+      const up = await uploadMedia(creds, btoa(b64))
+      if (up.ok && up.mediaId) mediaIds = [up.mediaId]
+    }
+  }
+
+  const result = await postTweet(creds, post.body, mediaIds.length ? mediaIds : undefined)
+  if (!result.ok) return c.json({ error: `X投稿失敗: ${result.error}` }, 502)
+
+  await DB.prepare("UPDATE x_posts SET published_at = datetime('now'), buffer_id = ? WHERE post_id = ?").bind(result.tweetId, id).run()
+  await DB.prepare("INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('sora', 'x_publish', 'success', ?, CURRENT_TIMESTAMP)")
+    .bind(`Xへ投稿完了: ${result.tweetUrl}`).run()
+
+  return c.json({ ok: true, tweet_id: result.tweetId, tweet_url: result.tweetUrl, with_image: mediaIds.length > 0 })
+})
+
 // 既存投稿をYutoにリライトさせる(QA指摘を反映)
 app.post('/api/posts/:id/rewrite', async (c) => {
   const { DB } = c.env
@@ -255,7 +410,7 @@ app.post('/api/posts/:id/rewrite', async (c) => {
   const qa = runQaCheck(result.content, result.content.includes('#PR'))
   await DB.prepare('UPDATE x_posts SET body = ?, qa_status = ?, qa_issues = ? WHERE post_id = ?')
     .bind(result.content, qa.status, JSON.stringify(qa.issues), id).run()
-  await DB.prepare("INSERT INTO worker_logs (worker_name, action, detail) VALUES ('yuto', 'llm_rewrite', ?)")
+  await DB.prepare("INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('yuto', 'llm_rewrite', 'success', ?, CURRENT_TIMESTAMP)")
     .bind(`OpenAI(gpt-5)でリライト: ${id}`).run()
 
   return c.json({ post_id: id, body: result.content, qa, model: result.model, usage: result.usage, costUsd: result.costUsd })
@@ -446,6 +601,7 @@ app.get('/', (c) => {
         <button data-view="kpi" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-chart-line mr-1"></i>KPI</button>
         <button data-view="qa" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-shield-halved mr-1"></i>QAチェック</button>
         <button data-view="affiliate" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-link mr-1"></i>アフィリンク</button>
+        <button data-view="images" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-image mr-1"></i>画像</button>
         <button data-view="cost" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-microchip mr-1"></i>AIコスト</button>
       </nav>
     </div>

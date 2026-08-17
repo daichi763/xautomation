@@ -39,8 +39,8 @@
 | GET | `/api/glossary` / POST `/api/glossary/suggest` | 用語辞書/注釈サジェスト |
 
 ## データアーキテクチャ
-- **ストレージ**: Cloudflare D1(ローカルは `--local` SQLite)
-- **テーブル**: `worker_status` / `worker_logs` / `topic_candidates` / `x_posts` / `note_articles` / `kpi_daily` / `approval_queue` / `task_queue`
+- **ストレージ**: Cloudflare D1(ローカルは `--local` SQLite) + R2(生成画像の保存)
+- **テーブル**: `worker_status` / `worker_logs` / `topic_candidates` / `x_posts` / `note_articles` / `kpi_daily` / `approval_queue` / `task_queue` / `affiliate_links` / `glossary` / `generated_images`
 - **データフロー**: 企画承認→Kai翻訳タスク投入 / 投稿承認→Sora予約タスク投入 / 差戻→Yuto書き直しタスク投入(task_queue経由で連鎖)
 - **QAロジック**: `src/qa-rules.ts` に禁止表現DB(指示書08章)を実装。API・UI両方から利用
 
@@ -78,11 +78,13 @@
 ## 未実装(次の開発ステップ)
 - [x] OpenAI API 接続 — Yuto(gpt-5)の実AI執筆/リライト、Mio(gpt-5-mini)の実AI法務審査が稼働中
 - [ ] Riko/Kaiの実LLM化(情報収集ソース接続とセットで実装予定)
-- [ ] Buffer API 連携(Soraの実予約投稿)— `BUFFER_TOKEN` が必要
+- [x] X API 直接接続 — OAuth1.0a署名実装済み。`X_API_KEY`/`X_API_SECRET`/`X_ACCESS_TOKEN`/`X_ACCESS_TOKEN_SECRET` の4シークレット登録で自動投稿が有効化(未登録時はコピペ半自動運用)
+  - ※Buffer APIは新規開発者受付終了のため、指示書のBuffer経由構成からX API直接接続に変更
 - [ ] note Browser Rendering(有料プラン+専用Workerが必要)
 - [ ] Reddit/YouTube/RSS の実巡回(Rikoのソース収集)
 - [ ] Cloudflare Access による取締役認証(本番デプロイ時)
-- [ ] 画像生成連携(Aki)
+- [x] 画像生成連携(Aki) — gpt-image-2でブランド準拠画像を生成しR2に保存。「画像」タブで操作
+- [x] 画像QA(Mio) — GPT-5 visionで誤字/法令/権利/ブランド準拠を自動審査。生成時に自動実行+再審査ボタン
 
 ## 使い方(取締役向け)
 1. **オフィス**: 9人の稼働状況を眺める。デスクをクリックすると実行ログが見える
