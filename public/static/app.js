@@ -45,6 +45,10 @@ async function updateApprovalBadge() {
 async function renderOffice() {
   const { data } = await axios.get('/api/office');
   const { workers, tasks, kpi_today, kpi_yesterday, pending_approvals, recent_logs } = data;
+  let nanaReport = null;
+  let weekPlan = null;
+  try { nanaReport = (await axios.get('/api/reports/daily')).data.reports?.[0] || null; } catch (e) {}
+  try { weekPlan = (await axios.get('/api/plans/weekly')).data.plans?.[0] || null; } catch (e) {}
 
   const followerDelta = kpi_today && kpi_yesterday ? kpi_today.x_followers - kpi_yesterday.x_followers : 0;
   const revenueToday = kpi_today ? (kpi_today.note_paid_sales || 0) + (kpi_today.affiliate_revenue || 0) : 0;
@@ -96,6 +100,26 @@ async function renderOffice() {
       </div>
     </section>
 
+    ${nanaReport ? `
+    <section id="nana-report" class="bg-white rounded-xl shadow p-4 border-l-4 ${nanaReport.stale_pending > 0 ? 'border-amber-400' : 'border-brand-navy'}">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="font-bold text-brand-navy"><span class="text-xl mr-1">📋</span>Nanaの日次レポート <span class="text-xs text-slate-400 font-normal ml-2">${esc(nanaReport.report_date)}</span></h3>
+        ${nanaReport.stale_pending > 0 ? `<span class="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-bold"><i class="fas fa-triangle-exclamation mr-1"></i>24h超滞留 ${nanaReport.stale_pending}件</span>` : ''}
+      </div>
+      <div class="text-sm whitespace-pre-wrap leading-relaxed text-slate-700">${esc(nanaReport.body_md)}</div>
+    </section>` : ''}
+
+    ${weekPlan ? `
+    <section id="weekly-plan" class="bg-white rounded-xl shadow p-4">
+      <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h3 class="font-bold text-brand-navy"><span class="text-xl mr-1">🧑‍💼</span>Alexの今週の計画 <span class="text-xs text-slate-400 font-normal ml-2">${esc(weekPlan.week_start)}週</span></h3>
+        <button id="toggle-plan-btn" class="text-xs text-brand-navy underline">詳細を見る</button>
+      </div>
+      <p class="text-sm font-bold text-brand-orange mb-2">テーマ: ${esc(weekPlan.theme)}</p>
+      ${(() => { let ts = []; try { ts = JSON.parse(weekPlan.tasks_json || '[]'); } catch (e) {} return ts.length ? `<div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-1.5 text-[11px]">${ts.map((t) => `<div class="bg-slate-50 rounded-lg p-2"><div class="font-bold text-brand-navy">${esc(t.day)}曜</div><div class="text-slate-600 mt-0.5">${esc(t.x_focus || '')}</div></div>`).join('')}</div>` : ''; })()}
+      <div id="plan-detail" class="hidden mt-3 text-sm whitespace-pre-wrap leading-relaxed text-slate-700 border-t pt-3">${esc(weekPlan.body_md)}</div>
+    </section>` : ''}
+
     <div class="grid md:grid-cols-3 gap-4">
       <section id="kpi-summary" class="bg-white rounded-xl shadow p-4">
         <h3 class="font-bold text-brand-navy mb-3"><i class="fas fa-gauge mr-2"></i>本日のKPI</h3>
@@ -141,6 +165,9 @@ async function renderOffice() {
     await axios.post('/api/simulate/tick');
     toast('ワーカーの状態を更新しました');
     if (currentView === 'office') renderOffice();
+  });
+  document.getElementById('toggle-plan-btn')?.addEventListener('click', () => {
+    document.getElementById('plan-detail')?.classList.toggle('hidden');
   });
 }
 
@@ -260,19 +287,24 @@ async function renderApprove() {
             <span class="w-2 h-2 rounded-full ${cronStatus?.secretConfigured ? 'bg-emerald-500' : 'bg-amber-500'}"></span>
             定時実行 ${cronStatus?.secretConfigured ? '設定済み' : '未設定(手動ボタンは利用可)'}
           </span>
-          <span class="text-xs text-slate-500">🌅 毎朝1回: Riko巡回(10ネタ) → Kai翻訳 → Yuto12枠執筆 → Mio QA → ゲート②に並ぶ(途中承認なし)</span>
+          <span class="text-xs text-slate-500">🌅 毎朝1回: [月]Alex週次計画 → Riko巡回(10ネタ) → Kai翻訳 → Yuto12枠執筆+Aki枠3図解 → note執筆(日曜=有料) → Rui分析 → Nanaレポート</span>
         </div>
         ${cronStatus?.recentRuns?.length ? `
         <div class="overflow-x-auto"><table class="w-full text-xs">
           <thead><tr class="text-left text-slate-400 border-b"><th class="py-1 pr-3">日時</th><th class="py-1 pr-3">ワーカー</th><th class="py-1 pr-3">処理</th><th class="py-1 pr-3">結果</th><th class="py-1">詳細</th></tr></thead>
           <tbody>${cronStatus.recentRuns.map((r) => {
             let d = {}; try { d = JSON.parse(r.output_json || '{}'); } catch (e) {}
-            const WORKER_JA = { riko: 'Riko', kai: 'Kai', yuto: 'Yuto', mio: 'Mio' };
-            const ACTION_JA = { auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: '執筆', auto_qa: 'QA審査' };
+            const WORKER_JA = { alex: 'Alex', riko: 'Riko', kai: 'Kai', yuto: 'Yuto', aki: 'Aki', rui: 'Rui', nana: 'Nana', mio: 'Mio' };
+            const ACTION_JA = { weekly_plan: '週次計画', auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: 'X執筆', auto_note: 'note執筆', auto_qa: 'QA審査', auto_infographic: '図解生成', daily_analysis: '日次分析', weekly_analysis: '週次分析', daily_report: '日次レポート' };
             let detail = '';
             if (r.worker_name === 'riko') detail = `収集${d.collected ?? '-'}件 → ネタ${d.inserted ?? '-'}件投入${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.worker_name === 'kai') detail = `翻訳${d.translated ?? '-'}本${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.worker_name === 'mio') detail = `審査${d.checked ?? '-'}本(OK ${d.ok ?? 0} / 要修正 ${d.needsFix ?? 0} / NG ${d.ng ?? 0})`;
+            else if (r.worker_name === 'alex') detail = `テーマ:${d.theme ? esc(d.theme).slice(0, 30) : '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.worker_name === 'aki') detail = `図解「${d.title ? esc(d.title) : '-'}」 QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.worker_name === 'rui') detail = `分析完了${d.proposals != null ? ` 提案${d.proposals}つ` : ''}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.worker_name === 'nana') detail = `承認待ち${d.pending ?? '-'}件 / 滞留${d.stale ?? 0}件${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.action === 'auto_note') detail = `note「${d.title ? esc(d.title).slice(0, 25) : '-'}」(${d.type === 'paid_single' ? '有料' : '無料'}) QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else detail = `投稿${d.postsCreated ?? '-'}本生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             return `<tr class="border-b border-slate-50"><td class="py-1 pr-3 text-slate-500">${esc((r.finished_at || '').slice(5, 16))}</td><td class="py-1 pr-3 font-bold">${WORKER_JA[r.worker_name] || r.worker_name}</td><td class="py-1 pr-3">${ACTION_JA[r.action] || r.action}</td><td class="py-1 pr-3">${r.status === 'success' ? '<span class="text-emerald-600">成功</span>' : '<span class="text-red-500">失敗</span>'}</td><td class="py-1 text-slate-500">${esc(detail)}</td></tr>`;
           }).join('')}</tbody>
@@ -350,6 +382,8 @@ function qaBadge(qa_status, qa_issues) {
 function postCard(p) {
   let issues = [];
   try { issues = JSON.parse(p.qa_issues || '[]'); } catch (e) {}
+  let imageUrls = [];
+  try { imageUrls = JSON.parse(p.image_urls || '[]'); } catch (e) {}
   const isAffiliateSlot = p.slot_number === 8 || (p.body || '').includes('#PR');
   return `
   <article class="post-card bg-white rounded-xl shadow p-4 flex flex-col gap-2">
@@ -358,6 +392,7 @@ function postCard(p) {
       ${qaBadge(p.qa_status, p.qa_issues)}
     </div>
     <p class="text-sm whitespace-pre-wrap leading-relaxed flex-1">${esc(p.body)}</p>
+    ${imageUrls.length ? `<div class="flex gap-2">${imageUrls.map((u) => `<img src="${esc(u)}" alt="添付図解" class="h-32 rounded-lg border border-slate-200 object-cover cursor-pointer" onclick="window.open('${esc(u)}', '_blank')">`).join('')}<span class="text-[10px] text-slate-400 self-end">🎨 Aki生成図解(クリックで拡大)</span></div>` : ''}
     ${issues.length ? `<div class="bg-amber-50 border border-amber-200 rounded-lg p-2 text-xs text-amber-800">${issues.map((i) => `<div><b>[${esc(i.rule)}]</b> ${esc(i.detail)}</div>`).join('')}</div>` : ''}
     ${isAffiliateSlot ? `<button class="embed-affiliate-btn w-full bg-brand-orange/10 text-brand-orange border border-brand-orange/40 py-1.5 rounded-lg text-xs font-bold hover:bg-brand-orange/20" data-id="${esc(p.post_id)}"><i class="fas fa-link mr-1"></i>アフィリンクを自動埋め込み</button>` : ''}
     ${p.qa_status === 'needs_fix' || p.qa_status === 'ng' ? `<button class="llm-rewrite-btn w-full bg-purple-50 text-purple-700 border border-purple-300 py-1.5 rounded-lg text-xs font-bold hover:bg-purple-100" data-id="${esc(p.post_id)}"><i class="fas fa-wand-magic-sparkles mr-1"></i>Yuto(AI)にリライトさせる</button>` : ''}
@@ -395,8 +430,9 @@ function noteCard(n) {
     <div class="flex items-center justify-between flex-wrap gap-2">
       <div>
         <div class="flex items-center gap-2 mb-1">
-          <span class="text-[10px] bg-brand-orange text-white px-2 py-0.5 rounded-full font-bold">${typeJa[n.type] || n.type}</span>
+          <span class="text-[10px] ${n.type === 'free' ? 'bg-slate-500' : 'bg-brand-orange'} text-white px-2 py-0.5 rounded-full font-bold">${typeJa[n.type] || n.type}</span>
           ${qaBadge(n.qa_status, null)}
+          <span class="text-[10px] text-slate-400">${esc((n.created_at || '').slice(0, 10))}</span>
         </div>
         <h3 class="font-bold">${esc(n.title)}</h3>
       </div>
@@ -470,26 +506,58 @@ function bindDecisionButtons() {
 async function openNotePreview(id) {
   const { data } = await axios.get(`/api/notes/${id}`);
   const a = data.article;
+  const typeJa = { free: '無料記事', paid_single: `有料記事 ¥${a.price_yen}`, monthly_summary: `月次まとめ ¥${a.price_yen}`, membership: 'メンバーシップ' };
+  // paywall位置で分割して可視化(有料記事のみ)
+  const marker = '<!--paywall-->';
+  const hasPaywall = a.type !== 'free' && a.body_md.includes(marker);
+  let bodyHtml;
+  if (hasPaywall) {
+    const [freePart, ...rest] = a.body_md.split(marker);
+    const paidPart = rest.join(marker);
+    bodyHtml = `
+      <pre class="whitespace-pre-wrap text-sm leading-relaxed font-sans">${esc(freePart.trim())}</pre>
+      <div class="my-4 flex items-center gap-3">
+        <div class="flex-1 border-t-2 border-dashed border-brand-orange"></div>
+        <span class="bg-brand-orange text-white text-xs font-bold px-3 py-1.5 rounded-full"><i class="fas fa-lock mr-1"></i>ここから有料(¥${a.price_yen})</span>
+        <div class="flex-1 border-t-2 border-dashed border-brand-orange"></div>
+      </div>
+      <div class="bg-orange-50/60 rounded-xl p-3 border border-orange-200">
+        <pre class="whitespace-pre-wrap text-sm leading-relaxed font-sans">${esc(paidPart.trim())}</pre>
+      </div>`;
+  } else {
+    bodyHtml = `<pre class="whitespace-pre-wrap text-sm leading-relaxed font-sans">${esc(a.body_md)}</pre>`;
+  }
   const root = document.getElementById('modal-root');
   root.innerHTML = `
   <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)this.parentNode.innerHTML=''">
     <div class="bg-white rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl fade-in">
-      <div class="bg-brand-navy text-white p-4 rounded-t-2xl flex items-center justify-between sticky top-0">
-        <h3 class="font-bold">${esc(a.title)}</h3>
+      <div class="bg-brand-navy text-white p-4 rounded-t-2xl flex items-center justify-between sticky top-0 gap-2">
+        <h3 class="font-bold flex-1">${esc(a.title)}</h3>
+        <button id="copy-note-md-btn" class="bg-white/15 hover:bg-white/25 text-white text-xs font-bold px-3 py-1.5 rounded-lg"><i class="fas fa-copy mr-1"></i>Markdownをコピー</button>
         <button onclick="document.getElementById('modal-root').innerHTML=''" class="text-white/70 hover:text-white text-xl"><i class="fas fa-xmark"></i></button>
       </div>
       <div class="p-5">
-        <div class="text-xs text-slate-400 mb-3">種別: ${esc(a.type)} / 価格: ¥${a.price_yen} ${a.paywall_position ? `/ 有料化ライン: ${a.paywall_position}行目` : ''}</div>
-        <pre class="whitespace-pre-wrap text-sm leading-relaxed font-sans">${esc(a.body_md)}</pre>
+        <div class="text-xs text-slate-400 mb-3">種別: ${typeJa[a.type] || esc(a.type)}${hasPaywall ? ' / 下のオレンジの線がnoteの有料化ラインになります' : ''} / 文字数: 約${a.body_md.replace(marker, '').length}字</div>
+        ${bodyHtml}
       </div>
     </div>
   </div>`;
+  document.getElementById('copy-note-md-btn')?.addEventListener('click', async () => {
+    await navigator.clipboard.writeText(a.body_md.replace(marker, '\n\n───── ここに有料ラインを設定 ─────\n\n'));
+    toast('Markdownをコピーしました。noteのエディタに貼り付けて公開してください');
+  });
 }
 
 /* ============ KPIビュー ============ */
 async function renderKPI() {
   const { data } = await axios.get('/api/kpi?days=14');
   const { history, summary } = data;
+  let analyses = { daily: [], weekly: [] };
+  try { analyses = (await axios.get('/api/reports/analysis')).data; } catch (e) {}
+  const latestDaily = analyses.daily?.[0];
+  const latestWeekly = analyses.weekly?.[0];
+  let weeklyProposals = [];
+  try { weeklyProposals = JSON.parse(latestWeekly?.proposals_json || '[]'); } catch (e) {}
 
   $app.innerHTML = `
   <div class="fade-in space-y-6">
@@ -506,6 +574,33 @@ async function renderKPI() {
       <h3 class="font-bold text-sm text-brand-navy mb-3">Xフォロワー / 売上の推移</h3>
       <canvas id="kpi-chart" height="110"></canvas>
     </div>
+
+    ${latestDaily || latestWeekly ? `
+    <section id="rui-analysis" class="space-y-4">
+      <h2 class="font-bold text-lg text-brand-navy"><span class="text-xl mr-1">📊</span>Ruiの分析レポート</h2>
+      ${latestWeekly ? `
+      <div class="bg-white rounded-xl shadow p-4 border-l-4 border-brand-orange">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="font-bold text-brand-navy">週次分析(7日総括) <span class="text-xs text-slate-400 font-normal ml-2">${esc(latestWeekly.report_date)}</span></h3>
+        </div>
+        <div class="text-sm whitespace-pre-wrap leading-relaxed text-slate-700 max-h-72 overflow-y-auto">${esc(latestWeekly.body_md)}</div>
+        ${weeklyProposals.length ? `
+        <div class="mt-3 border-t pt-3">
+          <h4 class="font-bold text-sm text-brand-navy mb-2"><i class="fas fa-lightbulb mr-1 text-brand-orange"></i>今週の改善提案(Alexの週次計画に反映されます)</h4>
+          <div class="grid md:grid-cols-3 gap-3">${weeklyProposals.map((p, i) => `
+            <div class="bg-orange-50 rounded-lg p-3 text-xs">
+              <div class="font-bold text-brand-navy mb-1">${i + 1}. ${esc(p.title || '')}</div>
+              <div class="text-slate-600 mb-1">${esc(p.action || '')}</div>
+              <div class="text-brand-orange">→ ${esc(p.expected || '')}</div>
+            </div>`).join('')}</div>
+        </div>` : ''}
+      </div>` : ''}
+      ${latestDaily ? `
+      <div class="bg-white rounded-xl shadow p-4">
+        <h3 class="font-bold text-brand-navy mb-2">日次分析 <span class="text-xs text-slate-400 font-normal ml-2">${esc(latestDaily.report_date)}</span></h3>
+        <div class="text-sm whitespace-pre-wrap leading-relaxed text-slate-700 max-h-72 overflow-y-auto">${esc(latestDaily.body_md)}</div>
+      </div>` : ''}
+    </section>` : ''}
     <div class="bg-white rounded-xl shadow p-4 overflow-x-auto">
       <h3 class="font-bold text-sm text-brand-navy mb-3">日次明細</h3>
       <table class="w-full text-xs">

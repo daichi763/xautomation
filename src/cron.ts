@@ -1,9 +1,15 @@
-// 全自動パイプライン(指示書準拠): Riko収集 → Kai翻訳 → Yuto執筆 → Mio QA → ゲート②(投稿一括承認)
-// 取締役の承認は最終ゲート②のみ。途中承認なし。
+// 全自動パイプライン(指示書準拠):
+// [月曜] Alex週次計画 → Riko収集 → Kai翻訳 → Yuto執筆(+Aki枠3図解) → note執筆 → Rui分析(日曜は週次も) → Nana日次レポート
+// 取締役の承認はゲート②(投稿一括)・ゲート③(有料note)のみ。途中承認なし。
 import { runRikoCrawl } from './riko'
 import { translateSource } from './kai'
 import { callOpenAI, YUTO_SYSTEM } from './llm'
 import { runQaCheck } from './qa-rules'
+import { runAlexWeeklyPlan, getCurrentWeekPlan } from './alex'
+import { runNoteWriter, todayNoteType } from './note-writer'
+import { runAkiInfographic } from './aki'
+import { runRuiDaily, runRuiWeekly } from './rui'
+import { runNanaReport } from './nana'
 
 // 指示書§05 12枠タイムテーブル
 export const SLOT_TABLE: { slot: number; time: string; type: string; limit: string }[] = [
@@ -54,23 +60,51 @@ async function logWorker(db: D1Database, worker: string, action: string, ok: boo
 
 export interface PipelineResult {
   ok: boolean
+  alex: { ran: boolean; theme?: string; costUsd: number; error?: string }
   riko: { collected: number; inserted: number; costUsd: number; errors: string[] }
   kai: { translated: number; costUsd: number; errors: string[] }
   yuto: { postsCreated: number; costUsd: number; errors: string[] }
+  aki: { generated: boolean; qaStatus?: string; costUsd: number; error?: string }
+  note: { created: boolean; type?: string; title?: string; costUsd: number; error?: string }
+  rui: { daily: boolean; weekly: boolean; costUsd: number; errors: string[] }
+  nana: { reported: boolean; costUsd: number; error?: string }
   mio: { checked: number; ok: number; needsFix: number; ng: number }
   totalCostUsd: number
   error?: string
 }
 
+// JSTの曜日 (0=日曜, 1=月曜)
+function jstDay(): number {
+  return new Date(Date.now() + 9 * 3600 * 1000).getUTCDay()
+}
+
 // フルパイプライン実行(朝1回)
-export async function runDailyPipeline(db: D1Database, apiKey: string): Promise<PipelineResult> {
+export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: string): Promise<PipelineResult> {
   const result: PipelineResult = {
     ok: false,
+    alex: { ran: false, costUsd: 0 },
     riko: { collected: 0, inserted: 0, costUsd: 0, errors: [] },
     kai: { translated: 0, costUsd: 0, errors: [] },
     yuto: { postsCreated: 0, costUsd: 0, errors: [] },
+    aki: { generated: false, costUsd: 0 },
+    note: { created: false, costUsd: 0 },
+    rui: { daily: false, weekly: false, costUsd: 0, errors: [] },
+    nana: { reported: false, costUsd: 0 },
     mio: { checked: 0, ok: 0, needsFix: 0, ng: 0 },
     totalCostUsd: 0,
+  }
+
+  // ========== Phase 0: Alex 週次計画(月曜、または今週分未作成なら作成) ==========
+  try {
+    const hasPlan = await getCurrentWeekPlan(db)
+    if (jstDay() === 1 || !hasPlan) {
+      const alex = await runAlexWeeklyPlan(db, apiKey)
+      result.alex = { ran: alex.ok && !alex.error?.includes('スキップ'), theme: alex.theme, costUsd: alex.costUsd, error: alex.error }
+      if (alex.ok && !alex.error) await logWorker(db, 'alex', 'weekly_plan', true, { theme: alex.theme, costUsd: alex.costUsd })
+      else if (!alex.ok) await logWorker(db, 'alex', 'weekly_plan', false, { error: alex.error })
+    }
+  } catch (e: any) {
+    result.alex.error = e?.message
   }
 
   // ========== Phase 1: Riko 巡回(10ネタ) ==========
@@ -112,6 +146,21 @@ export async function runDailyPipeline(db: D1Database, apiKey: string): Promise<
   const gl = await db.prepare('SELECT term, annotation FROM glossary LIMIT 30').all()
   const glossaryNote = ((gl.results || []) as any[]).map((g) => `※${g.term}=${g.annotation}`).join('\n')
 
+  // 今週の計画(Alex)から今日の切り口を取得(あればYutoプロンプトに注入)
+  let todayFocus = ''
+  try {
+    const plan: any = await getCurrentWeekPlan(db)
+    if (plan?.tasks_json) {
+      const dayNames = ['日', '月', '火', '水', '木', '金', '土']
+      const todayName = dayNames[jstDay()]
+      const tasks = JSON.parse(plan.tasks_json)
+      const t = Array.isArray(tasks) ? tasks.find((x: any) => x.day === todayName) : null
+      if (t) todayFocus = `\n▓今週のテーマ(Alexの週次計画): ${plan.theme}\n▓今日の切り口: ${t.x_focus || ''}`
+    }
+  } catch { /* 計画なしでも続行 */ }
+
+  let slot3Created: { postId: string; body: string; topicTitle: string } | null = null
+
   for (const slotDef of SLOT_TABLE) {
     const { topic, markdown } = translations[(slotDef.slot - 1) % translations.length]
     const userPrompt = `以下のKai(翻訳担当)の翻訳要約をもとに、「枠${slotDef.slot}: ${slotDef.type}(${slotDef.time}投稿 / ${slotDef.limit})」のX投稿を1本執筆してください。
@@ -123,7 +172,7 @@ export async function runDailyPipeline(db: D1Database, apiKey: string): Promise<
 ${markdown.slice(0, 2500)}
 
 ▓参考: 既存の用語注釈集(同じ固有名詞はこの注釈を使う)
-${glossaryNote}`
+${glossaryNote}${todayFocus}`
 
     const written = await callOpenAI(apiKey, 'gpt-5', YUTO_SYSTEM, userPrompt, 3000)
     if (!written.ok) {
@@ -167,6 +216,7 @@ ${glossaryNote}`
         .bind(postId, topic.topic_id, slotDef.slot, nextScheduledAt(slotDef.time), body, qa.status, JSON.stringify(qa.issues))
         .run()
       result.yuto.postsCreated++
+      if (slotDef.slot === 3) slot3Created = { postId, body, topicTitle: topic.title_ja }
     } catch (e: any) {
       result.yuto.errors.push(`枠${slotDef.slot}保存失敗: ${e.message}`)
     }
@@ -180,7 +230,59 @@ ${glossaryNote}`
   await logWorker(db, 'yuto', 'auto_write', result.yuto.postsCreated > 0, { postsCreated: result.yuto.postsCreated, costUsd: result.yuto.costUsd, errors: result.yuto.errors.slice(0, 3) })
   await logWorker(db, 'mio', 'auto_qa', true, result.mio)
 
-  result.totalCostUsd = result.riko.costUsd + result.kai.costUsd + result.yuto.costUsd
+  // ========== Phase 5: Aki 枠3図解生成 → Mio画像QA → 投稿に添付 ==========
+  if (slot3Created) {
+    try {
+      const aki = await runAkiInfographic(db, r2, apiKey, slot3Created.postId, slot3Created.body, slot3Created.topicTitle)
+      result.aki = { generated: aki.ok, qaStatus: aki.qaStatus, costUsd: aki.costUsd, error: aki.error }
+      await logWorker(db, 'aki', 'auto_infographic', aki.ok, { imageId: aki.imageId, title: aki.title, qaStatus: aki.qaStatus, costUsd: aki.costUsd, error: aki.error })
+    } catch (e: any) {
+      result.aki.error = e?.message
+    }
+  }
+
+  // ========== Phase 6: Yuto note記事執筆(毎日1本: 日曜=有料・他=無料 → ゲート③) ==========
+  try {
+    // note向きのネタ(翻訳済みの中で本日未使用のものを優先、なければ先頭)
+    const noteTopic = translations[translations.length - 1] || translations[0]
+    const note = await runNoteWriter(db, apiKey, noteTopic.topic, noteTopic.markdown)
+    result.note = { created: note.ok, type: note.type, title: note.title, costUsd: note.costUsd, error: note.error }
+    await logWorker(db, 'yuto', 'auto_note', note.ok, { articleId: note.articleId, type: note.type, title: note.title, qaStatus: note.qaStatus, costUsd: note.costUsd, error: note.error })
+  } catch (e: any) {
+    result.note.error = e?.message
+  }
+
+  // ========== Phase 7: Rui 分析(毎日日次、日曜は週次も) ==========
+  try {
+    const ruiD = await runRuiDaily(db, apiKey)
+    result.rui.daily = ruiD.ok
+    result.rui.costUsd += ruiD.costUsd
+    if (!ruiD.ok && ruiD.error) result.rui.errors.push(ruiD.error)
+    await logWorker(db, 'rui', 'daily_analysis', ruiD.ok, { reportId: ruiD.reportId, costUsd: ruiD.costUsd, error: ruiD.error })
+
+    if (jstDay() === 0) {
+      const ruiW = await runRuiWeekly(db, apiKey)
+      result.rui.weekly = ruiW.ok
+      result.rui.costUsd += ruiW.costUsd
+      if (!ruiW.ok && ruiW.error) result.rui.errors.push(ruiW.error)
+      await logWorker(db, 'rui', 'weekly_analysis', ruiW.ok, { reportId: ruiW.reportId, proposals: ruiW.proposals?.length || 0, costUsd: ruiW.costUsd, error: ruiW.error })
+    }
+  } catch (e: any) {
+    result.rui.errors.push(e?.message || 'Rui実行エラー')
+  }
+
+  // ========== Phase 8: Nana 日次レポート(最後に全体を集計) ==========
+  try {
+    const nana = await runNanaReport(db, apiKey)
+    result.nana = { reported: nana.ok, costUsd: nana.costUsd, error: nana.error }
+    await logWorker(db, 'nana', 'daily_report', nana.ok, { reportId: nana.reportId, pending: nana.pendingCount, stale: nana.stalePending, costUsd: nana.costUsd, error: nana.error })
+  } catch (e: any) {
+    result.nana.error = e?.message
+  }
+
+  result.totalCostUsd =
+    result.alex.costUsd + result.riko.costUsd + result.kai.costUsd + result.yuto.costUsd +
+    result.aki.costUsd + result.note.costUsd + result.rui.costUsd + result.nana.costUsd
   result.ok = result.yuto.postsCreated > 0
   if (!result.ok) result.error = 'Yuto執筆が全件失敗しました'
   return result

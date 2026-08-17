@@ -8,6 +8,7 @@ import { buildImagePrompt, generateImage, qaImage, IMAGE_SIZE, IMAGE_COST_USD, t
 import { getXCredentials, postTweet, uploadMedia } from './x-api'
 import { runRikoCrawl } from './riko'
 import { runDailyPipeline, SLOT_TABLE } from './cron'
+import { runNanaReport } from './nana'
 import { getAuthState, registerUser, loginUser, logoutUser, sessionCookie, clearSessionCookie, parseSessionCookie, ALLOWED_EMAILS } from './auth'
 
 type Bindings = {
@@ -616,7 +617,7 @@ app.post('/api/simulate/tick', async (c) => {
 
 // 手動パイプライン実行(UIボタンから。認証ミドルウェアで保護済み)
 app.post('/api/pipeline/run', async (c) => {
-  const result = await runDailyPipeline(c.env.DB, c.env.OPENAI_API_KEY || '')
+  const result = await runDailyPipeline(c.env.DB, c.env.R2, c.env.OPENAI_API_KEY || '')
   return c.json(result, result.ok ? 200 : 502)
 })
 
@@ -638,7 +639,7 @@ app.post('/api/riko/crawl', async (c) => {
 app.get('/api/cron/status', async (c) => {
   const { DB } = c.env
   const logs = await DB.prepare(
-    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run') ORDER BY id DESC LIMIT 12"
+    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'auto_note', 'daily_analysis', 'weekly_analysis', 'daily_report') ORDER BY id DESC LIMIT 16"
   ).all()
   return c.json({
     secretConfigured: !!c.env.CRON_SECRET,
@@ -656,8 +657,40 @@ app.post('/api/cron/run', async (c) => {
   const provided = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (provided !== secret) return c.json({ error: 'unauthorized' }, 401)
 
-  const result = await runDailyPipeline(c.env.DB, c.env.OPENAI_API_KEY || '')
+  const result = await runDailyPipeline(c.env.DB, c.env.R2, c.env.OPENAI_API_KEY || '')
   return c.json(result)
+})
+
+// ============================================================
+// Nana(秘書): 日次レポート / Rui(分析): 分析レポート / Alex(PM): 週次計画
+// ============================================================
+
+// 最新のNana日次レポート(ダッシュボード表示用)
+app.get('/api/reports/daily', async (c) => {
+  const { DB } = c.env
+  const rows = await DB.prepare('SELECT * FROM daily_reports ORDER BY created_at DESC LIMIT 7').all()
+  return c.json({ reports: rows.results })
+})
+
+// Rui分析レポート(日次+週次)
+app.get('/api/reports/analysis', async (c) => {
+  const { DB } = c.env
+  const daily = await DB.prepare("SELECT * FROM analysis_reports WHERE report_type = 'daily' ORDER BY created_at DESC LIMIT 3").all()
+  const weekly = await DB.prepare("SELECT * FROM analysis_reports WHERE report_type = 'weekly' ORDER BY created_at DESC LIMIT 2").all()
+  return c.json({ daily: daily.results, weekly: weekly.results })
+})
+
+// Alex週次計画
+app.get('/api/plans/weekly', async (c) => {
+  const { DB } = c.env
+  const rows = await DB.prepare('SELECT * FROM weekly_plans ORDER BY week_start DESC LIMIT 4').all()
+  return c.json({ plans: rows.results })
+})
+
+// Nanaレポートを手動再生成(デバッグ/即時確認用)
+app.post('/api/reports/daily/run', async (c) => {
+  const result = await runNanaReport(c.env.DB, c.env.OPENAI_API_KEY || '')
+  return c.json(result, result.ok ? 200 : 502)
 })
 
 // ============================================================

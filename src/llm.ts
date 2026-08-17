@@ -24,12 +24,15 @@ function calcCost(model: ModelId, usage: LlmUsage): number {
   return (usage.prompt_tokens / 1_000_000) * p.input + (usage.completion_tokens / 1_000_000) * p.output
 }
 
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
+
 export async function callOpenAI(
   apiKey: string,
   model: ModelId,
   systemPrompt: string,
   userPrompt: string,
   maxTokens = 2000,
+  reasoningEffort: ReasoningEffort = 'low',
 ): Promise<LlmResult> {
   if (!apiKey) {
     return { ok: false, content: '', model, error: 'OPENAI_API_KEY が未設定です。シークレット登録が必要です。' }
@@ -48,9 +51,8 @@ export async function callOpenAI(
           { role: 'user', content: userPrompt },
         ],
         max_completion_tokens: maxTokens,
-        // GPT-5系は推論トークンを消費するため、短文生成タスクでは推論を最小化して
-        // 出力トークンを確保する(コスト削減にも寄与)
-        reasoning_effort: 'low',
+        // GPT-5系は推論トークンを消費する。短文生成は low、長文・分析・選定は medium/high を呼び側で指定
+        reasoning_effort: reasoningEffort,
       }),
     })
     const data: any = await res.json()

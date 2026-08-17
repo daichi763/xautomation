@@ -1,5 +1,5 @@
 // Riko(企画・リサーチ)実巡回ロジック
-// RSS/Reddit収集 → gpt-5-mini でネタ選定・日本向けアレンジ → topic_candidates 投入
+// RSS/Reddit収集 → gpt-5(推論medium) でネタ選定・日本向けアレンジ → topic_candidates 投入
 import { collectRss, collectReddit, type RawItem } from './sources'
 import { callOpenAI } from './llm'
 
@@ -64,16 +64,17 @@ export async function runRikoCrawl(db: D1Database, apiKey: string): Promise<Riko
     return { ok: true, collected: items.length, inserted: 0, topics: [], errors, costUsd: 0, error: '新規記事なし(全て既出)' }
   }
 
-  // 3. gpt-5-mini でネタ選定
+  // 3. gpt-5(推論medium) でネタ選定 — 品質優先方針
   const listText = fresh
     .map((it, i) => `[${i}] (${it.source}${it.score ? ` / ${it.score}pt` : ''}) ${it.title}\n${it.summary ? it.summary.slice(0, 200) : ''}`)
     .join('\n\n')
   const llm = await callOpenAI(
     apiKey,
-    'gpt-5-mini',
+    'gpt-5',
     RIKO_SYSTEM,
     `本日収集した海外記事一覧です。日本向けネタとして有望なものを選定してください(目標10件):\n\n${listText}`,
-    5000,
+    16000, // 推論(medium)トークンも上限に含まれるため余裕を持たせる
+    'medium',
   )
   if (!llm.ok) {
     return { ok: false, collected: items.length, inserted: 0, topics: [], errors, costUsd: 0, error: `LLM選定失敗: ${llm.error}` }

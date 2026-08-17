@@ -76,6 +76,7 @@ export async function translateSource(apiKey: string, input: KaiInput): Promise<
 
 ${sourceText ? `▓原文(取得済み):\n${sourceText}` : `▓原文取得に失敗しました。上記タイトル・選定理由と以下の収集時要約から、確実に言える範囲のみで要約してください(推測は「〜と思われる」と明示):\n${input.source_summary || '(要約なし)'}`}`
 
-  const result = await callOpenAI(apiKey, 'gpt-5-mini', KAI_SYSTEM, userPrompt, 2500)
+  // 品質優先方針: 翻訳の正確性が信頼の生命線のため gpt-5 + 推論medium
+  const result = await callOpenAI(apiKey, 'gpt-5', KAI_SYSTEM, userPrompt, 10000, 'medium') // 推論トークン込みの予算
   return { ...result, sourceFetched: !!sourceText }
 }
