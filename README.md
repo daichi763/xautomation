@@ -57,7 +57,8 @@
 ## 指示書からの変更点(改善)
 元の指示書はAI作成のため、以下を現実的な構成に調整しました:
 1. **Cloudflare Queues → D1テーブル(task_queue)**: Queues は Pages では利用不可+有料機能のため、D1で同等のキュー機構を実装(挙動は同一、後からWorkers移行可)
-2. **Cron Triggers → GitHub Actions 定時実行**: Pages では Cron 未対応のため、GitHub Actions(`.github/workflows/cron.yml`)から `/api/cron/run` を定時呼び出し。JST 06:00=朝サイクル(Riko巡回)、JST 21:00=夕サイクル(Yuto執筆)。CRON_SECRETのBearer認証で保護
+2. **Cron Triggers → GitHub Actions 定時実行**: Pages では Cron 未対応のため、GitHub Actionsから `/api/cron/run` を定時呼び出し。JST 06:00=朝サイクル(Riko巡回)、JST 21:00=夕サイクル(Yuto執筆)。CRON_SECRETのBearer認証で保護
+   - **有効化手順(2分・手動)**: GitHub App権限の制約でワークフローの自動配置ができないため、①リポジトリ直下の `github-actions-cron.yml` を `.github/workflows/cron.yml` にリネームして配置(GitHub Web UIの「Add file」でOK)、② Settings → Secrets and variables → Actions で `CRON_SECRET` を登録(値は取締役に別途共有)。それまでは承認画面の手動ボタンで同じ処理を実行可能
 3. **LLM/Buffer/note自動投稿は未接続**: APIキー(OpenAI/Buffer)とnote認証情報が必要なため、タスク投入までを実装。キー提供後に接続可能
 4. **LLMをAnthropic Claude→OpenAI GPT-5ファミリに変更**: ユーザーのOpenAI APIキーで運用可能に。モデル割当とコスト試算はダッシュボードの「AIコスト」タブで可視化(`src/model-plan.ts` / `/api/models/cost`)
 5. **React → CDNベースのVanilla JS SPA**: ビルド構成を単純化し、同一Pagesプロジェクト内でAPI+UIを完結
