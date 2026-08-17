@@ -12,8 +12,9 @@
   - 📖 **用語注釈辞書**: 固有名詞(KDP・Etsy等)の素人向け注釈を辞書管理。Yutoの執筆ルールに組み込み
 
 ## URL
-- **サンドボックスプレビュー**: https://3000-i94l1sj6tl7trvmsyql1g-3844e1b6.sandbox.novita.ai
-- **本番**: 未デプロイ(Cloudflare Pages へデプロイ可能)
+- **本番**: https://0c9c4d00-0596-4d2b-8bc9-5a2b11a4709d.vip.gensparksite.com
+- **GitHub**: https://github.com/daichi763/xautomation
+- **サンドボックスプレビュー(開発用)**: https://3000-i94l1sj6tl7trvmsyql1g-3844e1b6.sandbox.novita.ai
 
 ## 機能エントリ(API)
 | メソッド | パス | 説明 |
@@ -79,7 +80,8 @@ pm2 start ecosystem.config.cjs                         # 起動(port 3000)
 ```
 
 ## デプロイ
-- **プラットフォーム**: Cloudflare Pages(D1バインディング必要)
-- **ステータス**: ✅ サンドボックスで稼働中 / 本番未デプロイ
+- **プラットフォーム**: Cloudflare Workers(Genspark管理ホスティング / Workers for Platform)
+- **ステータス**: ✅ 本番稼働中
+- **DB**: 管理D1(スキーマ+シードデータ適用済み)
 - **技術スタック**: Hono + TypeScript + D1(SQLite) + TailwindCSS(CDN) + Chart.js
 - **最終更新**: 2026-08-17
