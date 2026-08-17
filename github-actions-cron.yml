@@ -1,40 +1,26 @@
-# AI Virtual Office 自動サイクル定時実行
-# 朝サイクル(Riko巡回)  : JST 06:00 = UTC 21:00(前日)
-# 夕サイクル(Yuto一括執筆): JST 21:00 = UTC 12:00
-name: auto-cycle-cron
+# AI Virtual Office 全自動パイプライン定時実行
+# 毎朝 JST 05:30 = UTC 20:30(前日)に1回実行:
+#   Riko巡回(10ネタ) → Kai翻訳 → Yuto12枠執筆 → Mio QA → ゲート②(投稿一括承認)に並ぶ
+#
+# 【有効化手順】このファイルを .github/workflows/cron.yml に配置し、
+# リポジトリの Settings → Secrets and variables → Actions に CRON_SECRET を登録
+name: daily-pipeline
 
 on:
   schedule:
-    - cron: '0 21 * * *'   # JST 06:00 → morning(Riko巡回)
-    - cron: '0 12 * * *'   # JST 21:00 → evening(Yuto執筆)
-  workflow_dispatch:
-    inputs:
-      cycle:
-        description: 'サイクル(morning/evening/auto)'
-        required: false
-        default: 'auto'
+    - cron: '30 20 * * *'   # JST 05:30
+  workflow_dispatch: {}
 
 jobs:
-  run-cycle:
+  run-pipeline:
     runs-on: ubuntu-latest
     steps:
-      - name: Determine cycle
-        id: cycle
-        run: |
-          if [ -n "${{ github.event.inputs.cycle }}" ]; then
-            echo "cycle=${{ github.event.inputs.cycle }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "0 21 * * *" ]; then
-            echo "cycle=morning" >> "$GITHUB_OUTPUT"
-          else
-            echo "cycle=evening" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Call cron endpoint
+      - name: Run daily pipeline
         run: |
           HTTP_CODE=$(curl -s -o /tmp/res.json -w "%{http_code}" -X POST \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            --max-time 600 \
-            "https://0c9c4d00-0596-4d2b-8bc9-5a2b11a4709d.vip.gensparksite.com/api/cron/run?cycle=${{ steps.cycle.outputs.cycle }}")
+            --max-time 900 \
+            "https://0c9c4d00-0596-4d2b-8bc9-5a2b11a4709d.vip.gensparksite.com/api/cron/run")
           echo "HTTP $HTTP_CODE"
           cat /tmp/res.json
           [ "$HTTP_CODE" = "200" ] || exit 1

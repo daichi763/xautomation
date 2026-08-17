@@ -7,7 +7,8 @@ import { callOpenAI, YUTO_SYSTEM, MIO_SYSTEM } from './llm'
 import { buildImagePrompt, generateImage, qaImage, IMAGE_SIZE, IMAGE_COST_USD, type ImagePurpose } from './image-gen'
 import { getXCredentials, postTweet, uploadMedia } from './x-api'
 import { runRikoCrawl } from './riko'
-import { runCronCycle, runYutoAutoWrite, resolveCycle, SLOT_TABLE } from './cron'
+import { runDailyPipeline, SLOT_TABLE } from './cron'
+import { getAuthState, registerUser, loginUser, logoutUser, sessionCookie, clearSessionCookie, parseSessionCookie, ALLOWED_EMAILS } from './auth'
 
 type Bindings = {
   DB: D1Database
@@ -23,6 +24,52 @@ type Bindings = {
 const app = new Hono<{ Bindings: Bindings }>()
 
 app.use('/api/*', cors())
+
+// ============================================================
+// 認証(メールアドレス+パスワード / セッションCookie)
+// ============================================================
+
+// 認証不要パス: 認証API自体と cron(CRON_SECRETで別途保護)
+const AUTH_EXEMPT = ['/api/auth/status', '/api/auth/register', '/api/auth/login', '/api/auth/logout', '/api/cron/run']
+
+app.use('/api/*', async (c, next) => {
+  if (AUTH_EXEMPT.includes(new URL(c.req.url).pathname)) return next()
+  const token = parseSessionCookie(c.req.header('Cookie'))
+  const auth = await getAuthState(c.env.DB, token)
+  if (!auth.email) return c.json({ error: 'unauthorized', needLogin: true }, 401)
+  return next()
+})
+
+app.get('/api/auth/status', async (c) => {
+  const token = parseSessionCookie(c.req.header('Cookie'))
+  const auth = await getAuthState(c.env.DB, token)
+  return c.json({ registered: auth.registered, loggedIn: !!auth.email, email: auth.email })
+})
+
+app.post('/api/auth/register', async (c) => {
+  const { email, password } = await c.req.json<{ email: string; password: string }>()
+  const result = await registerUser(c.env.DB, email || '', password || '')
+  if (!result.ok) return c.json({ error: result.error }, 400)
+  // 登録後そのままログイン
+  const login = await loginUser(c.env.DB, email, password)
+  if (login.ok && login.token) c.header('Set-Cookie', sessionCookie(login.token))
+  return c.json({ ok: true })
+})
+
+app.post('/api/auth/login', async (c) => {
+  const { email, password } = await c.req.json<{ email: string; password: string }>()
+  const result = await loginUser(c.env.DB, email || '', password || '')
+  if (!result.ok) return c.json({ error: result.error }, 401)
+  c.header('Set-Cookie', sessionCookie(result.token!))
+  return c.json({ ok: true })
+})
+
+app.post('/api/auth/logout', async (c) => {
+  const token = parseSessionCookie(c.req.header('Cookie'))
+  if (token) await logoutUser(c.env.DB, token)
+  c.header('Set-Cookie', clearSessionCookie())
+  return c.json({ ok: true })
+})
 
 // ============================================================
 // Virtual Office API
@@ -564,10 +611,16 @@ app.post('/api/simulate/tick', async (c) => {
 })
 
 // ============================================================
-// Riko実巡回 + Cron自動サイクル
+// 全自動パイプライン: Riko→Kai→Yuto→Mio→ゲート②
 // ============================================================
 
-// Riko手動巡回(UI「巡回開始」ボタンから呼ぶ)
+// 手動パイプライン実行(UIボタンから。認証ミドルウェアで保護済み)
+app.post('/api/pipeline/run', async (c) => {
+  const result = await runDailyPipeline(c.env.DB, c.env.OPENAI_API_KEY || '')
+  return c.json(result, result.ok ? 200 : 502)
+})
+
+// Riko巡回のみ手動実行(ネタ収集だけしたいとき用)
 app.post('/api/riko/crawl', async (c) => {
   const { DB } = c.env
   const started = Date.now()
@@ -581,35 +634,21 @@ app.post('/api/riko/crawl', async (c) => {
   return c.json(result, result.ok ? 200 : 502)
 })
 
-// Yuto手動一括執筆(承認済みネタ → 自動6枠生成)
-app.post('/api/yuto/auto-write', async (c) => {
-  const { DB } = c.env
-  const result = await runYutoAutoWrite(DB, c.env.OPENAI_API_KEY || '')
-  await DB.prepare(
-    "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('yuto', 'manual_auto_write', ?, ?, CURRENT_TIMESTAMP)"
-  ).bind(
-    result.ok ? 'success' : 'failed',
-    JSON.stringify({ topicsUsed: result.topicsUsed, postsCreated: result.postsCreated, costUsd: result.costUsd, errors: result.errors.slice(0, 5) })
-  ).run()
-  return c.json(result, result.ok ? 200 : 502)
-})
-
 // Cron状態確認
 app.get('/api/cron/status', async (c) => {
   const { DB } = c.env
   const logs = await DB.prepare(
-    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_write', 'manual_crawl', 'manual_auto_write') ORDER BY id DESC LIMIT 10"
+    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run') ORDER BY id DESC LIMIT 12"
   ).all()
   return c.json({
     secretConfigured: !!c.env.CRON_SECRET,
-    currentCycle: resolveCycle(undefined),
     slotTable: SLOT_TABLE,
     recentRuns: logs.results,
   })
 })
 
-// Cron実行エンドポイント(GitHub Actionsから定時呼び出し)
-// アクセスルール上は public だが、CRON_SECRET で認証する
+// Cron実行エンドポイント(GitHub Actionsから朝1回呼び出し)
+// セッション認証の代わりに CRON_SECRET で認証する
 app.post('/api/cron/run', async (c) => {
   const secret = c.env.CRON_SECRET
   if (!secret) return c.json({ error: 'CRON_SECRET が未設定です' }, 503)
@@ -617,10 +656,8 @@ app.post('/api/cron/run', async (c) => {
   const provided = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (provided !== secret) return c.json({ error: 'unauthorized' }, 401)
 
-  const cycleParam = c.req.query('cycle') // morning / evening / auto(省略時auto)
-  const cycle = cycleParam === 'morning' || cycleParam === 'evening' ? cycleParam : 'auto'
-  const result = await runCronCycle(c.env.DB, c.env.OPENAI_API_KEY || '', cycle as any)
-  return c.json({ ok: true, ...result })
+  const result = await runDailyPipeline(c.env.DB, c.env.OPENAI_API_KEY || '')
+  return c.json(result)
 })
 
 // ============================================================

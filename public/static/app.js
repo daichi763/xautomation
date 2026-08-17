@@ -206,14 +206,15 @@ async function renderApprove() {
       </div>
       ${posts.length ? `<div class="grid md:grid-cols-2 gap-3">${posts.map(postCard).join('')}</div>`
         : `<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">承認待ちの投稿はありません 🎉<br>
-           <button id="yuto-auto-btn" class="mt-3 bg-brand-orange text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-pen-nib mr-1"></i>Yutoに承認済みネタから一括執筆させる</button></p>`}
+           <button id="pipeline-run-btn" class="mt-3 bg-brand-orange text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-robot mr-1"></i>パイプラインを今すぐ実行(Riko→Kai→Yuto→Mio)</button></p>`}
     </section>
 
     <section id="gate-weekly">
       <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
         <h2 class="font-bold text-lg text-brand-navy"><i class="fas fa-lightbulb mr-2"></i>ゲート① 週次企画の選定(${topics.length}案)</h2>
-        <button id="riko-crawl-btn" class="bg-brand-navy text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-satellite-dish mr-1"></i>Riko巡回を今すぐ実行</button>
+        <button id="riko-crawl-btn" class="bg-brand-navy text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-satellite-dish mr-1"></i>Riko巡回のみ実行</button>
       </div>
+      <p class="text-xs text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>日次の投稿生成はパイプラインが自動で進行します(ここでの承認は不要)。このゲートは週次企画(noteテーマ等)の選定用です</p>
       ${topics.length ? `<div class="grid md:grid-cols-2 gap-3">${topics.map(topicCard).join('')}</div>`
         : '<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">選定待ちの企画はありません</p>'}
     </section>
@@ -259,17 +260,21 @@ async function renderApprove() {
             <span class="w-2 h-2 rounded-full ${cronStatus?.secretConfigured ? 'bg-emerald-500' : 'bg-amber-500'}"></span>
             定時実行 ${cronStatus?.secretConfigured ? '設定済み' : '未設定(手動ボタンは利用可)'}
           </span>
-          <span class="text-xs text-slate-500">🌅 朝: Riko巡回でネタ収集 → ゲート①へ / 🌆 夕: 承認済みネタからYutoが6枠執筆 → ゲート②へ</span>
+          <span class="text-xs text-slate-500">🌅 毎朝1回: Riko巡回(10ネタ) → Kai翻訳 → Yuto12枠執筆 → Mio QA → ゲート②に並ぶ(途中承認なし)</span>
         </div>
         ${cronStatus?.recentRuns?.length ? `
         <div class="overflow-x-auto"><table class="w-full text-xs">
           <thead><tr class="text-left text-slate-400 border-b"><th class="py-1 pr-3">日時</th><th class="py-1 pr-3">ワーカー</th><th class="py-1 pr-3">処理</th><th class="py-1 pr-3">結果</th><th class="py-1">詳細</th></tr></thead>
           <tbody>${cronStatus.recentRuns.map((r) => {
             let d = {}; try { d = JSON.parse(r.output_json || '{}'); } catch (e) {}
-            const detail = r.worker_name === 'riko'
-              ? `収集${d.collected ?? '-'}件 → ネタ${d.inserted ?? '-'}件投入${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`
-              : `ネタ${d.topicsUsed ?? '-'}件 → 投稿${d.postsCreated ?? '-'}本生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
-            return `<tr class="border-b border-slate-50"><td class="py-1 pr-3 text-slate-500">${esc((r.finished_at || '').slice(5, 16))}</td><td class="py-1 pr-3 font-bold">${r.worker_name === 'riko' ? 'Riko' : 'Yuto'}</td><td class="py-1 pr-3">${r.action.includes('crawl') ? '巡回' : '一括執筆'}${r.action.startsWith('auto') ? '(自動)' : '(手動)'}</td><td class="py-1 pr-3">${r.status === 'success' ? '<span class="text-emerald-600">成功</span>' : '<span class="text-red-500">失敗</span>'}</td><td class="py-1 text-slate-500">${esc(detail)}</td></tr>`;
+            const WORKER_JA = { riko: 'Riko', kai: 'Kai', yuto: 'Yuto', mio: 'Mio' };
+            const ACTION_JA = { auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: '執筆', auto_qa: 'QA審査' };
+            let detail = '';
+            if (r.worker_name === 'riko') detail = `収集${d.collected ?? '-'}件 → ネタ${d.inserted ?? '-'}件投入${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.worker_name === 'kai') detail = `翻訳${d.translated ?? '-'}本${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.worker_name === 'mio') detail = `審査${d.checked ?? '-'}本(OK ${d.ok ?? 0} / 要修正 ${d.needsFix ?? 0} / NG ${d.ng ?? 0})`;
+            else detail = `投稿${d.postsCreated ?? '-'}本生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            return `<tr class="border-b border-slate-50"><td class="py-1 pr-3 text-slate-500">${esc((r.finished_at || '').slice(5, 16))}</td><td class="py-1 pr-3 font-bold">${WORKER_JA[r.worker_name] || r.worker_name}</td><td class="py-1 pr-3">${ACTION_JA[r.action] || r.action}</td><td class="py-1 pr-3">${r.status === 'success' ? '<span class="text-emerald-600">成功</span>' : '<span class="text-red-500">失敗</span>'}</td><td class="py-1 text-slate-500">${esc(detail)}</td></tr>`;
           }).join('')}</tbody>
         </table></div>` : '<p class="text-xs text-slate-400">まだ自動サイクルの実行履歴がありません</p>'}
       </div>
@@ -285,21 +290,21 @@ async function renderApprove() {
       renderApprove(); updateApprovalBadge();
     } catch (e) {
       toast(e.response?.data?.error || '巡回に失敗しました', 'error');
-      btn.disabled = false; btn.innerHTML = '<i class="fas fa-satellite-dish mr-1"></i>Riko巡回を今すぐ実行';
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-satellite-dish mr-1"></i>Riko巡回のみ実行';
     }
   });
 
-  document.getElementById('yuto-auto-btn')?.addEventListener('click', async () => {
-    const btn = document.getElementById('yuto-auto-btn');
-    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>執筆中(1〜3分)...';
+  document.getElementById('pipeline-run-btn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('pipeline-run-btn');
+    if (!confirm('フルパイプライン(Riko巡回→Kai翻訳→Yuto12枠執筆→Mio QA)を実行します。所要時間は5〜10分、コストは約$0.2です。よろしいですか？')) return;
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>実行中(5〜10分、このままお待ちください)...';
     try {
-      const { data } = await axios.post('/api/yuto/auto-write', {}, { timeout: 300000 });
-      if (data.postsCreated > 0) toast(`Yutoが${data.postsCreated}本の投稿を生成しました(ネタ${data.topicsUsed}件使用 / $${(data.costUsd || 0).toFixed(3)})`);
-      else toast(data.errors?.[0] || '生成対象がありませんでした', 'error');
+      const { data } = await axios.post('/api/pipeline/run', {}, { timeout: 900000 });
+      toast(`パイプライン完了: ネタ${data.riko.inserted}件 → 翻訳${data.kai.translated}本 → 投稿${data.yuto.postsCreated}本生成($${(data.totalCostUsd || 0).toFixed(3)})`);
       renderApprove(); updateApprovalBadge();
     } catch (e) {
-      toast(e.response?.data?.error || '一括執筆に失敗しました', 'error');
-      btn.disabled = false; btn.innerHTML = '<i class="fas fa-pen-nib mr-1"></i>Yutoに承認済みネタから一括執筆させる';
+      toast(e.response?.data?.error || 'パイプライン実行に失敗しました', 'error');
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-robot mr-1"></i>パイプラインを今すぐ実行(Riko→Kai→Yuto→Mio)';
     }
   });
 
@@ -1062,6 +1067,82 @@ function navigate(view) {
 window.navigate = navigate;
 
 document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => navigate(b.dataset.view)));
-navigate('office');
-updateApprovalBadge();
-setInterval(updateApprovalBadge, 30000);
+
+/* ============ 認証(メール+パスワード) ============ */
+function renderLogin(registered) {
+  document.getElementById('app-header')?.classList.add('hidden');
+  $app.innerHTML = `
+  <div class="fade-in min-h-[80vh] flex items-center justify-center">
+    <div class="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
+      <div class="text-center mb-6">
+        <div class="text-4xl mb-2">🏢</div>
+        <h1 class="font-bold text-xl text-brand-navy">AI Virtual Office</h1>
+        <p class="text-sm text-slate-500 mt-1">Mさん / 海外AI副業の検証部屋</p>
+      </div>
+      ${registered ? '' : `<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800 mb-4"><i class="fas fa-key mr-1"></i>初回設定: 許可されたメールアドレスと新しいパスワード(8文字以上)を登録してください</div>`}
+      <form id="login-form" class="space-y-4">
+        <div>
+          <label class="block text-xs font-bold text-slate-600 mb-1">メールアドレス</label>
+          <input id="login-email" type="email" required class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="you@example.com" autocomplete="username">
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-slate-600 mb-1">パスワード${registered ? '' : '(8文字以上・新規設定)'}</label>
+          <input id="login-password" type="password" required minlength="8" class="w-full border rounded-lg px-3 py-2 text-sm" autocomplete="${registered ? 'current-password' : 'new-password'}">
+        </div>
+        <button type="submit" class="w-full bg-brand-navy text-white py-2.5 rounded-lg font-bold text-sm hover:opacity-90">
+          <i class="fas ${registered ? 'fa-right-to-bracket' : 'fa-user-plus'} mr-1"></i>${registered ? 'ログイン' : '初回登録して開始'}
+        </button>
+        <p id="login-error" class="hidden text-xs text-red-600 text-center"></p>
+      </form>
+    </div>
+  </div>`;
+  document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('login-email').value;
+    const password = document.getElementById('login-password').value;
+    const errEl = document.getElementById('login-error');
+    try {
+      await axios.post(registered ? '/api/auth/login' : '/api/auth/register', { email, password });
+      location.reload();
+    } catch (err) {
+      errEl.textContent = err.response?.data?.error || '認証に失敗しました';
+      errEl.classList.remove('hidden');
+    }
+  });
+}
+
+// 401を検知したらログイン画面へ
+axios.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err.response?.status === 401 && err.response?.data?.needLogin) {
+      axios.get('/api/auth/status').then(({ data }) => renderLogin(data.registered)).catch(() => renderLogin(true));
+      return new Promise(() => {}); // 後続処理を止める
+    }
+    return Promise.reject(err);
+  }
+);
+
+async function boot() {
+  try {
+    const { data } = await axios.get('/api/auth/status');
+    if (!data.loggedIn) { renderLogin(data.registered); return; }
+    document.getElementById('app-header')?.classList.remove('hidden');
+    // ログアウトボタンをヘッダーに追加
+    const nav = document.querySelector('#app-header nav');
+    if (nav && !document.getElementById('logout-btn')) {
+      const btn = document.createElement('button');
+      btn.id = 'logout-btn';
+      btn.className = 'px-3 py-2 rounded-lg hover:bg-white/10 text-xs text-white/70';
+      btn.innerHTML = '<i class="fas fa-right-from-bracket mr-1"></i>ログアウト';
+      btn.addEventListener('click', async () => { await axios.post('/api/auth/logout'); location.reload(); });
+      nav.appendChild(btn);
+    }
+    navigate('office');
+    updateApprovalBadge();
+    setInterval(updateApprovalBadge, 30000);
+  } catch (e) {
+    renderLogin(true);
+  }
+}
+boot();

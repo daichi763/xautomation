@@ -26,7 +26,7 @@ export const RIKO_SYSTEM = `あなたはRiko、日本向け「海外AI副業の�
   ]
 }
 
-最大5件まで。良いネタがなければ少なくてよい。必ずJSONのみを出力すること。`
+最大10件まで(目標10件)。良いネタが足りなければ少なくてよい。必ずJSONのみを出力すること。`
 
 export interface RikoResult {
   ok: boolean
@@ -41,9 +41,9 @@ export interface RikoResult {
 export async function runRikoCrawl(db: D1Database, apiKey: string): Promise<RikoResult> {
   const errors: string[] = []
   // 1. 収集(RSS + Reddit 並列)
-  const [rss, reddit] = await Promise.all([collectRss(8), collectReddit(5)])
+  const [rss, reddit] = await Promise.all([collectRss(10), collectReddit(6)])
   errors.push(...rss.errors, ...reddit.errors)
-  const items: RawItem[] = [...reddit.items, ...rss.items].slice(0, 40)
+  const items: RawItem[] = [...reddit.items, ...rss.items].slice(0, 60)
 
   if (items.length === 0) {
     return { ok: false, collected: 0, inserted: 0, topics: [], errors, costUsd: 0, error: '収集0件(全ソース失敗)' }
@@ -72,8 +72,8 @@ export async function runRikoCrawl(db: D1Database, apiKey: string): Promise<Riko
     apiKey,
     'gpt-5-mini',
     RIKO_SYSTEM,
-    `本日収集した海外記事一覧です。日本向けネタとして有望なものを選定してください:\n\n${listText}`,
-    3000,
+    `本日収集した海外記事一覧です。日本向けネタとして有望なものを選定してください(目標10件):\n\n${listText}`,
+    5000,
   )
   if (!llm.ok) {
     return { ok: false, collected: items.length, inserted: 0, topics: [], errors, costUsd: 0, error: `LLM選定失敗: ${llm.error}` }
@@ -87,7 +87,7 @@ export async function runRikoCrawl(db: D1Database, apiKey: string): Promise<Riko
   } catch {
     return { ok: false, collected: items.length, inserted: 0, topics: [], errors, costUsd: llm.costUsd || 0, error: `JSON解析失敗: ${llm.content.slice(0, 200)}` }
   }
-  const topics = (parsed.topics || []).slice(0, 5)
+  const topics = (parsed.topics || []).slice(0, 10)
 
   // 5. topic_candidates に投入
   let inserted = 0
@@ -112,7 +112,7 @@ export async function runRikoCrawl(db: D1Database, apiKey: string): Promise<Riko
         )
         .run()
       inserted++
-      insertedTopics.push({ topic_id: topicId, ...t, source_url: src?.url, source_name: src?.source })
+      insertedTopics.push({ topic_id: topicId, ...t, source_url: src?.url, source_name: src?.source, source_summary: src?.summary || '' })
     } catch (e: any) {
       errors.push(`insert失敗: ${e.message}`)
     }

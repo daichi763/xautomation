@@ -1,7 +1,7 @@
-// 自動サイクルオーケストレータ
-// 朝サイクル: Riko巡回 → ネタ候補が承認キューに並ぶ
-// 夕サイクル: 承認済みネタ → Yuto執筆 → QA → 投稿承認キューに並ぶ
+// 全自動パイプライン(指示書準拠): Riko収集 → Kai翻訳 → Yuto執筆 → Mio QA → ゲート②(投稿一括承認)
+// 取締役の承認は最終ゲート②のみ。途中承認なし。
 import { runRikoCrawl } from './riko'
+import { translateSource } from './kai'
 import { callOpenAI, YUTO_SYSTEM } from './llm'
 import { runQaCheck } from './qa-rules'
 
@@ -21,20 +21,23 @@ export const SLOT_TABLE: { slot: number; time: string; type: string; limit: stri
   { slot: 12, time: '23:30', type: '深夜の一言', limit: '100字' },
 ]
 
-// 1回の夕サイクルで自動生成する枠(コスト管理のため主要6枠に絞る。残りは手動 or 将来拡張)
-const AUTO_SLOTS = [1, 3, 5, 8, 9, 10]
-
-export interface YutoAutoResult {
-  ok: boolean
-  topicsUsed: number
-  postsCreated: number
-  posts: { post_id: string; slot: number; qa_status: string }[]
-  costUsd: number
-  errors: string[]
+// 枠ごとの型ヒント(Yutoプロンプトに注入)
+const SLOT_HINTS: Record<number, string> = {
+  1: '冒頭「【海外速報】」で始め、要点3つ+出典URL。数字を1つ以上含める',
+  2: '今日発信する内容の予告。期待感を持たせつつ100字以内',
+  3: '図解画像を添付する前提の短文。図解の内容を要約する導入文',
+  4: '5〜8連スレッド形式。「1/」「2/」の番号付き。各140字以内。最初のツイートにフックを',
+  5: '昼休みに読める軽いTips。専門知識ゼロでも答えられる問いかけを含めても良い',
+  6: '海外の話題ツイートを引用RTする想定のコメント。100字以内',
+  7: '海外の成功/失敗事例を分解。「何が要因か」を僕の視点で',
+  8: 'ツール比較。アフィリエイトリンク想定のため文末に #PR を明記',
+  9: '読者への質問で終える。専門知識ゼロでも答えられる普遍的な問い',
+  10: '一人称の実践報告・失敗談。「試したら〜だった」形式',
+  11: 'note記事への誘導。売り込み感を出しすぎない',
+  12: '1日の締めの一言。生活感や本音をこぼす',
 }
 
 function nextScheduledAt(time: string): string {
-  // 翌日のJST時刻をUTC DATETIMEで返す(JST = UTC+9)
   const [h, m] = time.split(':').map(Number)
   const now = new Date()
   const jstNow = new Date(now.getTime() + 9 * 3600 * 1000)
@@ -42,57 +45,118 @@ function nextScheduledAt(time: string): string {
   return target.toISOString().replace('T', ' ').slice(0, 19)
 }
 
-export async function runYutoAutoWrite(db: D1Database, apiKey: string, maxTopics = 3): Promise<YutoAutoResult> {
-  const errors: string[] = []
-  const posts: { post_id: string; slot: number; qa_status: string }[] = []
-  let costUsd = 0
+async function logWorker(db: D1Database, worker: string, action: string, ok: boolean, output: any) {
+  await db
+    .prepare(`INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`)
+    .bind(worker, action, ok ? 'success' : 'failed', JSON.stringify(output))
+    .run()
+}
 
-  // 1. 承認済みネタを取得
-  const topicRows = await db
-    .prepare(`SELECT * FROM topic_candidates WHERE status = 'approved' ORDER BY urgency = 'high' DESC, created_at ASC LIMIT ?`)
-    .bind(maxTopics)
-    .all()
-  const topics = (topicRows.results || []) as any[]
-  if (topics.length === 0) {
-    return { ok: true, topicsUsed: 0, postsCreated: 0, posts: [], costUsd: 0, errors: ['承認済みネタがありません(承認ゲート1で承認してください)'] }
+export interface PipelineResult {
+  ok: boolean
+  riko: { collected: number; inserted: number; costUsd: number; errors: string[] }
+  kai: { translated: number; costUsd: number; errors: string[] }
+  yuto: { postsCreated: number; costUsd: number; errors: string[] }
+  mio: { checked: number; ok: number; needsFix: number; ng: number }
+  totalCostUsd: number
+  error?: string
+}
+
+// フルパイプライン実行(朝1回)
+export async function runDailyPipeline(db: D1Database, apiKey: string): Promise<PipelineResult> {
+  const result: PipelineResult = {
+    ok: false,
+    riko: { collected: 0, inserted: 0, costUsd: 0, errors: [] },
+    kai: { translated: 0, costUsd: 0, errors: [] },
+    yuto: { postsCreated: 0, costUsd: 0, errors: [] },
+    mio: { checked: 0, ok: 0, needsFix: 0, ng: 0 },
+    totalCostUsd: 0,
   }
 
-  // 2. 用語集注入
+  // ========== Phase 1: Riko 巡回(10ネタ) ==========
+  const riko = await runRikoCrawl(db, apiKey)
+  result.riko = { collected: riko.collected, inserted: riko.inserted, costUsd: riko.costUsd, errors: riko.errors.slice(0, 5) }
+  await logWorker(db, 'riko', 'auto_crawl', riko.ok, { collected: riko.collected, inserted: riko.inserted, costUsd: riko.costUsd })
+  if (!riko.ok || riko.topics.length === 0) {
+    result.error = riko.error || 'Riko巡回で新規ネタが得られませんでした'
+    // ネタゼロでも既存の翻訳済みネタで続行を試みる余地はあるが、シンプルに終了
+    return result
+  }
+
+  // ========== Phase 2: Kai 翻訳(上位4ネタ: urgency優先) ==========
+  const rank = { high: 0, medium: 1, low: 2 } as Record<string, number>
+  const topTopics = [...riko.topics].sort((a, b) => (rank[a.urgency] ?? 1) - (rank[b.urgency] ?? 1)).slice(0, 4)
+  const translations: { topic: any; markdown: string }[] = []
+  for (const topic of topTopics) {
+    const tr = await translateSource(apiKey, {
+      title_ja: topic.title_ja,
+      why_hit: topic.why_hit || '',
+      source_url: topic.source_url || '',
+      source_summary: topic.source_summary || '',
+    })
+    if (tr.ok) {
+      translations.push({ topic, markdown: tr.content })
+      result.kai.translated++
+      result.kai.costUsd += tr.costUsd || 0
+    } else {
+      result.kai.errors.push(`${topic.title_ja}: ${tr.error}`)
+    }
+  }
+  await logWorker(db, 'kai', 'auto_translate', result.kai.translated > 0, { translated: result.kai.translated, costUsd: result.kai.costUsd, errors: result.kai.errors.slice(0, 3) })
+  if (translations.length === 0) {
+    result.error = 'Kai翻訳が全件失敗しました'
+    return result
+  }
+
+  // ========== Phase 3: Yuto 執筆(12枠) + Phase 4: Mio QA ==========
   const gl = await db.prepare('SELECT term, annotation FROM glossary LIMIT 30').all()
   const glossaryNote = ((gl.results || []) as any[]).map((g) => `※${g.term}=${g.annotation}`).join('\n')
 
-  // 3. ネタ×枠の割り当て(ネタをローテーションして6枠分生成)
-  const tasks: { topic: any; slotDef: (typeof SLOT_TABLE)[0] }[] = []
-  AUTO_SLOTS.forEach((slotNum, i) => {
-    const topic = topics[i % topics.length]
-    const slotDef = SLOT_TABLE.find((s) => s.slot === slotNum)!
-    tasks.push({ topic, slotDef })
-  })
+  for (const slotDef of SLOT_TABLE) {
+    const { topic, markdown } = translations[(slotDef.slot - 1) % translations.length]
+    const userPrompt = `以下のKai(翻訳担当)の翻訳要約をもとに、「枠${slotDef.slot}: ${slotDef.type}(${slotDef.time}投稿 / ${slotDef.limit})」のX投稿を1本執筆してください。
 
-  // 4. 順次執筆(並列だとレート制限リスクがあるため直列)
-  for (const { topic, slotDef } of tasks) {
-    let sourceUrl = ''
-    try { sourceUrl = JSON.parse(topic.source_urls || '[]')[0] || '' } catch {}
-    const userPrompt = `以下のネタで「枠${slotDef.slot}: ${slotDef.type}(${slotDef.time}投稿 / ${slotDef.limit})」のX投稿を1本執筆してください。
+▓枠の型: ${SLOT_HINTS[slotDef.slot]}
 
-ネタ: ${topic.title_ja}
-狙い: ${topic.why_hit || ''}
-訴求軸: ${topic.appeal_axis || ''}
-出典URL: ${sourceUrl}
-
-枠の型に忠実に。枠1なら「【海外速報】」で始め要点3つ+出典。枠3なら図解前提の短文。枠8ならツール比較でアフィリエイト想定(#PR明記)。枠9なら読者への問いかけで終える。枠10なら一人称の実践報告調。
+▓ネタ: ${topic.title_ja}
+▓Kaiの翻訳要約:
+${markdown.slice(0, 2500)}
 
 ▓参考: 既存の用語注釈集(同じ固有名詞はこの注釈を使う)
 ${glossaryNote}`
 
-    const result = await callOpenAI(apiKey, 'gpt-5', YUTO_SYSTEM, userPrompt, 3000)
-    if (!result.ok) {
-      errors.push(`枠${slotDef.slot}執筆失敗: ${result.error}`)
+    const written = await callOpenAI(apiKey, 'gpt-5', YUTO_SYSTEM, userPrompt, 3000)
+    if (!written.ok) {
+      result.yuto.errors.push(`枠${slotDef.slot}: ${written.error}`)
       continue
     }
-    costUsd += result.costUsd || 0
+    result.yuto.costUsd += written.costUsd || 0
 
-    const qa = runQaCheck(result.content, slotDef.slot === 8 || /\bhttps?:\/\//.test(result.content))
+    // Mio QA(キーワードエンジン)。要修正ならYutoが1回だけ自動リライト
+    let body = written.content
+    let qa = runQaCheck(body, slotDef.slot === 8 || /\bhttps?:\/\//.test(body))
+    if (qa.status !== 'ok') {
+      const rewrite = await callOpenAI(
+        apiKey,
+        'gpt-5',
+        YUTO_SYSTEM,
+        `以下の投稿がQAで指摘を受けました。指摘を解消しつつ同じ内容・枠の型を維持して書き直してください。書き直した本文のみを出力:\n\n▓指摘:\n${qa.issues.map((i) => `- ${i.law}: ${i.matched}(${i.detail})`).join('\n')}\n\n▓元の投稿:\n${body}`,
+        3000,
+      )
+      if (rewrite.ok) {
+        result.yuto.costUsd += rewrite.costUsd || 0
+        const qa2 = runQaCheck(rewrite.content, slotDef.slot === 8 || /\bhttps?:\/\//.test(rewrite.content))
+        if (qa2.status === 'ok' || (qa2.status === 'needs_fix' && qa.status === 'ng')) {
+          body = rewrite.content
+          qa = qa2
+        }
+      }
+    }
+    result.mio.checked++
+    if (qa.status === 'ok') result.mio.ok++
+    else if (qa.status === 'needs_fix') result.mio.needsFix++
+    else result.mio.ng++
+
     const postId = `p-auto-${Date.now()}-${slotDef.slot}`
     try {
       await db
@@ -100,66 +164,24 @@ ${glossaryNote}`
           `INSERT INTO x_posts (post_id, topic_id, slot_number, scheduled_at, body, approval_status, qa_status, qa_issues)
            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
         )
-        .bind(postId, topic.topic_id, slotDef.slot, nextScheduledAt(slotDef.time), result.content, qa.status, JSON.stringify(qa.issues))
+        .bind(postId, topic.topic_id, slotDef.slot, nextScheduledAt(slotDef.time), body, qa.status, JSON.stringify(qa.issues))
         .run()
-      posts.push({ post_id: postId, slot: slotDef.slot, qa_status: qa.status })
+      result.yuto.postsCreated++
     } catch (e: any) {
-      errors.push(`枠${slotDef.slot}保存失敗: ${e.message}`)
+      result.yuto.errors.push(`枠${slotDef.slot}保存失敗: ${e.message}`)
     }
   }
 
-  // 5. 使用したネタをpublishedに更新(再利用防止。実際のX投稿は承認ゲート経由)
-  for (const topic of topics) {
+  // 使用したネタは published に(未使用の残りは pending のまま週次企画=ゲート①の材料に)
+  for (const { topic } of translations) {
     await db.prepare(`UPDATE topic_candidates SET status = 'published' WHERE topic_id = ?`).bind(topic.topic_id).run()
   }
 
-  return { ok: true, topicsUsed: topics.length, postsCreated: posts.length, posts, costUsd, errors }
-}
+  await logWorker(db, 'yuto', 'auto_write', result.yuto.postsCreated > 0, { postsCreated: result.yuto.postsCreated, costUsd: result.yuto.costUsd, errors: result.yuto.errors.slice(0, 3) })
+  await logWorker(db, 'mio', 'auto_qa', true, result.mio)
 
-// ============ サイクル全体 ============
-export type CronCycle = 'morning' | 'evening' | 'auto'
-
-export function resolveCycle(cycle: string | undefined): CronCycle {
-  if (cycle === 'morning' || cycle === 'evening') return cycle
-  // auto: JST時刻で判定(0-12時=morning / 12-24時=evening)
-  const jstHour = (new Date().getUTCHours() + 9) % 24
-  return jstHour < 12 ? 'morning' : 'evening'
-}
-
-export async function runCronCycle(
-  db: D1Database,
-  apiKey: string,
-  cycle: CronCycle,
-): Promise<{ cycle: CronCycle; riko?: any; yuto?: any }> {
-  const resolved: CronCycle = cycle === 'auto' ? resolveCycle(undefined) : cycle
-  const out: { cycle: CronCycle; riko?: any; yuto?: any } = { cycle: resolved }
-
-  if (resolved === 'morning') {
-    const started = Date.now()
-    const riko = await runRikoCrawl(db, apiKey)
-    out.riko = riko
-    await db
-      .prepare(
-        `INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('riko', 'auto_crawl', ?, ?, CURRENT_TIMESTAMP)`,
-      )
-      .bind(
-        riko.ok ? 'success' : 'failed',
-        JSON.stringify({ collected: riko.collected, inserted: riko.inserted, costUsd: riko.costUsd, ms: Date.now() - started, errors: riko.errors.slice(0, 5), error: riko.error }),
-      )
-      .run()
-  } else {
-    const started = Date.now()
-    const yuto = await runYutoAutoWrite(db, apiKey)
-    out.yuto = yuto
-    await db
-      .prepare(
-        `INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('yuto', 'auto_write', ?, ?, CURRENT_TIMESTAMP)`,
-      )
-      .bind(
-        yuto.ok ? 'success' : 'failed',
-        JSON.stringify({ topicsUsed: yuto.topicsUsed, postsCreated: yuto.postsCreated, costUsd: yuto.costUsd, ms: Date.now() - started, errors: yuto.errors.slice(0, 5) }),
-      )
-      .run()
-  }
-  return out
+  result.totalCostUsd = result.riko.costUsd + result.kai.costUsd + result.yuto.costUsd
+  result.ok = result.yuto.postsCreated > 0
+  if (!result.ok) result.error = 'Yuto執筆が全件失敗しました'
+  return result
 }
