@@ -37,10 +37,12 @@
 | POST | `/api/affiliate/embed` | 埋め込みプレビュー `{text}` |
 | POST | `/api/posts/:id/embed-affiliate` | 投稿へ自動埋め込み+再QA |
 | GET | `/api/glossary` / POST `/api/glossary/suggest` | 用語辞書/注釈サジェスト |
-| POST | `/api/riko/crawl` | Riko実巡回(RSS/Reddit収集→gpt-5-mini選定→ネタ投入) |
-| POST | `/api/yuto/auto-write` | Yuto一括執筆(承認済みネタ→6枠の投稿生成→承認キュー) |
+| POST | `/api/riko/crawl` | Riko実巡回のみ(RSS/Reddit収集→gpt-5-mini選定→10ネタ投入) |
+| POST | `/api/pipeline/run` | フルパイプライン手動実行(Riko→Kai→Yuto→Mio) |
 | GET | `/api/cron/status` | 自動サイクル状態+実行履歴 |
-| POST | `/api/cron/run?cycle=morning\|evening\|auto` | 定時実行エンドポイント(`Authorization: Bearer CRON_SECRET` 必須) |
+| POST | `/api/cron/run` | 定時実行エンドポイント(`Authorization: Bearer CRON_SECRET` 必須、セッション不要) |
+| GET | `/api/auth/status` | 認証状態(登録済み/ログイン中か) |
+| POST | `/api/auth/register` `/login` `/logout` | メール+パスワード認証(許可メールのみ登録可) |
 
 ## データアーキテクチャ
 - **ストレージ**: Cloudflare D1(ローカルは `--local` SQLite) + R2(生成画像の保存)
@@ -89,8 +91,9 @@
 - [ ] note Browser Rendering(有料プラン+専用Workerが必要)
 - [x] Reddit/RSS の実巡回 — 指示書§04の12 subreddit + 4 RSSフィードを巡回(subredditは日替わり6つローテーション)
 - [ ] YouTube/X監視アカウントの巡回(YouTube Data APIキー / X APIキー取得後に有効化)
-- [x] Cron自動サイクル — 朝: Riko巡回でネタ収集→ゲート① / 夕: 承認済みネタからYutoが6枠(1/3/5/8/9/10)を自動執筆→ゲート②。GitHub Actionsで定時実行
-- [x] アクセス制限 — Gensparkサインインの許可リスト方式(d.omori@dissectera.com のみ許可、`/api/cron/**` は別途CRON_SECRET認証)
+- [x] 全自動パイプライン(指示書準拠) — 毎朝1回: Riko巡回(10ネタ)→Kai翻訳(上位4ネタのソース深堀り)→Yuto12枠執筆→Mio QA(要修正は自動リライト1回)→ゲート②に12本並ぶ。途中承認なし、取締役の操作は最終の一括承認のみ
+- [x] Kaiの実LLM化 — 英語ソース(Redditは本文+上位コメント取得)を深堀り翻訳・要約しYutoの執筆入力に(`src/kai.ts`)
+- [x] 認証 — アプリ内メール+パスワード認証(PBKDF2 10万回ハッシュ+30日セッションCookie)。登録は許可メール(d.omori@dissectera.com)のみ。Gensparkサインインは廃止
 - [x] 画像生成連携(Aki) — gpt-image-2でブランド準拠画像を生成しR2に保存。「画像」タブで操作
 - [x] 画像QA(Mio) — GPT-5 visionで誤字/法令/権利/ブランド準拠を自動審査。生成時に自動実行+再審査ボタン
 
@@ -101,7 +104,8 @@
 4. **QAチェック**: 自分で書いた投稿文を貼ると、Mioが禁止表現を検出(例:「誰でも簡単に稼げる」→ 景表法指摘)。「Mio 実AIチェック」ボタンでGPT-5 miniによる深い審査+書き直し案も取得可能
 5. **AI執筆(Yuto)**: QAタブの「Yuto AI執筆スタジオ」でテーマを入れるとGPT-5が注釈・円換算・法令ルールを守った投稿を執筆。承認キューへの追加も可能
 6. **AIリライト**: 承認画面でQA要修正の投稿に「Yuto(AI)にリライトさせる」ボタンが出現。指摘を解消した文面に自動書き換え
-7. **自動サイクル(「朝起きたらネタが並んでいる」運用)**: 毎朝JST 06:00にRikoが海外ソースを巡回しゲート①にネタを並べる。取締役が承認すると、毎晚JST 21:00にYutoが翌日分6枠分を執筆しゲート②に並べる。承認画面の「Riko巡回を今すぐ実行」「Yutoに一括執筆させる」ボタンで手動実行も可能
+7. **全自動パイプライン(「朝起きたら翌日の投稿12本が並んでいる」運用)**: 毎朝JST 05:30にRiko巡回→10ネタ選定→Kaiが上位4ネタを深堀り翻訳→Yutoが12枠分執筆→Mioが全本QA(要修正は自動リライト)→ゲート②に並ぶ。取締役は「QA通過分を一括承認」を押すだけ(スマホ1分)。承認画面の「パイプラインを今すぐ実行」ボタンで手動実行も可能。1回約$0.18(月約$5.4≒¥810)
+8. **初回ログイン**: 許可メールアドレスと新しいパスワード(8文字以上)で初回登録。2回目以降は同じメール+パスワードでログイン(30日間有効)
 
 ## 開発
 ```bash
