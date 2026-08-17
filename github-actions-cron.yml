@@ -1,0 +1,40 @@
+# AI Virtual Office 自動サイクル定時実行
+# 朝サイクル(Riko巡回)  : JST 06:00 = UTC 21:00(前日)
+# 夕サイクル(Yuto一括執筆): JST 21:00 = UTC 12:00
+name: auto-cycle-cron
+
+on:
+  schedule:
+    - cron: '0 21 * * *'   # JST 06:00 → morning(Riko巡回)
+    - cron: '0 12 * * *'   # JST 21:00 → evening(Yuto執筆)
+  workflow_dispatch:
+    inputs:
+      cycle:
+        description: 'サイクル(morning/evening/auto)'
+        required: false
+        default: 'auto'
+
+jobs:
+  run-cycle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine cycle
+        id: cycle
+        run: |
+          if [ -n "${{ github.event.inputs.cycle }}" ]; then
+            echo "cycle=${{ github.event.inputs.cycle }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 21 * * *" ]; then
+            echo "cycle=morning" >> "$GITHUB_OUTPUT"
+          else
+            echo "cycle=evening" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Call cron endpoint
+        run: |
+          HTTP_CODE=$(curl -s -o /tmp/res.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            --max-time 600 \
+            "https://0c9c4d00-0596-4d2b-8bc9-5a2b11a4709d.vip.gensparksite.com/api/cron/run?cycle=${{ steps.cycle.outputs.cycle }}")
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/res.json
+          [ "$HTTP_CODE" = "200" ] || exit 1

@@ -6,6 +6,8 @@ import { computeCostPlan } from './model-plan'
 import { callOpenAI, YUTO_SYSTEM, MIO_SYSTEM } from './llm'
 import { buildImagePrompt, generateImage, qaImage, IMAGE_SIZE, IMAGE_COST_USD, type ImagePurpose } from './image-gen'
 import { getXCredentials, postTweet, uploadMedia } from './x-api'
+import { runRikoCrawl } from './riko'
+import { runCronCycle, runYutoAutoWrite, resolveCycle, SLOT_TABLE } from './cron'
 
 type Bindings = {
   DB: D1Database
@@ -15,6 +17,7 @@ type Bindings = {
   X_API_SECRET?: string
   X_ACCESS_TOKEN?: string
   X_ACCESS_TOKEN_SECRET?: string
+  CRON_SECRET?: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -558,6 +561,66 @@ app.post('/api/simulate/tick', async (c) => {
   await DB.prepare("INSERT INTO worker_logs (worker_name, action, status, finished_at) VALUES (?, ?, 'success', CURRENT_TIMESTAMP)")
     .bind(w, SIM_TASKS[w][Math.floor(Math.random() * SIM_TASKS[w].length)].replace('中', '完了')).run()
   return c.json({ ok: true, updates })
+})
+
+// ============================================================
+// Riko実巡回 + Cron自動サイクル
+// ============================================================
+
+// Riko手動巡回(UI「巡回開始」ボタンから呼ぶ)
+app.post('/api/riko/crawl', async (c) => {
+  const { DB } = c.env
+  const started = Date.now()
+  const result = await runRikoCrawl(DB, c.env.OPENAI_API_KEY || '')
+  await DB.prepare(
+    "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('riko', 'manual_crawl', ?, ?, CURRENT_TIMESTAMP)"
+  ).bind(
+    result.ok ? 'success' : 'failed',
+    JSON.stringify({ collected: result.collected, inserted: result.inserted, costUsd: result.costUsd, ms: Date.now() - started, error: result.error })
+  ).run()
+  return c.json(result, result.ok ? 200 : 502)
+})
+
+// Yuto手動一括執筆(承認済みネタ → 自動6枠生成)
+app.post('/api/yuto/auto-write', async (c) => {
+  const { DB } = c.env
+  const result = await runYutoAutoWrite(DB, c.env.OPENAI_API_KEY || '')
+  await DB.prepare(
+    "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('yuto', 'manual_auto_write', ?, ?, CURRENT_TIMESTAMP)"
+  ).bind(
+    result.ok ? 'success' : 'failed',
+    JSON.stringify({ topicsUsed: result.topicsUsed, postsCreated: result.postsCreated, costUsd: result.costUsd, errors: result.errors.slice(0, 5) })
+  ).run()
+  return c.json(result, result.ok ? 200 : 502)
+})
+
+// Cron状態確認
+app.get('/api/cron/status', async (c) => {
+  const { DB } = c.env
+  const logs = await DB.prepare(
+    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_write', 'manual_crawl', 'manual_auto_write') ORDER BY id DESC LIMIT 10"
+  ).all()
+  return c.json({
+    secretConfigured: !!c.env.CRON_SECRET,
+    currentCycle: resolveCycle(undefined),
+    slotTable: SLOT_TABLE,
+    recentRuns: logs.results,
+  })
+})
+
+// Cron実行エンドポイント(GitHub Actionsから定時呼び出し)
+// アクセスルール上は public だが、CRON_SECRET で認証する
+app.post('/api/cron/run', async (c) => {
+  const secret = c.env.CRON_SECRET
+  if (!secret) return c.json({ error: 'CRON_SECRET が未設定です' }, 503)
+  const auth = c.req.header('Authorization') || ''
+  const provided = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+  if (provided !== secret) return c.json({ error: 'unauthorized' }, 401)
+
+  const cycleParam = c.req.query('cycle') // morning / evening / auto(省略時auto)
+  const cycle = cycleParam === 'morning' || cycleParam === 'evening' ? cycleParam : 'auto'
+  const result = await runCronCycle(c.env.DB, c.env.OPENAI_API_KEY || '', cycle as any)
+  return c.json({ ok: true, ...result })
 })
 
 // ============================================================

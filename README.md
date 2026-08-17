@@ -37,6 +37,10 @@
 | POST | `/api/affiliate/embed` | 埋め込みプレビュー `{text}` |
 | POST | `/api/posts/:id/embed-affiliate` | 投稿へ自動埋め込み+再QA |
 | GET | `/api/glossary` / POST `/api/glossary/suggest` | 用語辞書/注釈サジェスト |
+| POST | `/api/riko/crawl` | Riko実巡回(RSS/Reddit収集→gpt-5-mini選定→ネタ投入) |
+| POST | `/api/yuto/auto-write` | Yuto一括執筆(承認済みネタ→6枠の投稿生成→承認キュー) |
+| GET | `/api/cron/status` | 自動サイクル状態+実行履歴 |
+| POST | `/api/cron/run?cycle=morning\|evening\|auto` | 定時実行エンドポイント(`Authorization: Bearer CRON_SECRET` 必須) |
 
 ## データアーキテクチャ
 - **ストレージ**: Cloudflare D1(ローカルは `--local` SQLite) + R2(生成画像の保存)
@@ -53,7 +57,7 @@
 ## 指示書からの変更点(改善)
 元の指示書はAI作成のため、以下を現実的な構成に調整しました:
 1. **Cloudflare Queues → D1テーブル(task_queue)**: Queues は Pages では利用不可+有料機能のため、D1で同等のキュー機構を実装(挙動は同一、後からWorkers移行可)
-2. **Cron Triggers → デモシミュレータ**: Pages では Cron 未対応。`/api/simulate/tick` で稼働感を再現。本番でLLM自動実行が必要になったら別Workerとして切り出す構成を推奨
+2. **Cron Triggers → GitHub Actions 定時実行**: Pages では Cron 未対応のため、GitHub Actions(`.github/workflows/cron.yml`)から `/api/cron/run` を定時呼び出し。JST 06:00=朝サイクル(Riko巡回)、JST 21:00=夕サイクル(Yuto執筆)。CRON_SECRETのBearer認証で保護
 3. **LLM/Buffer/note自動投稿は未接続**: APIキー(OpenAI/Buffer)とnote認証情報が必要なため、タスク投入までを実装。キー提供後に接続可能
 4. **LLMをAnthropic Claude→OpenAI GPT-5ファミリに変更**: ユーザーのOpenAI APIキーで運用可能に。モデル割当とコスト試算はダッシュボードの「AIコスト」タブで可視化(`src/model-plan.ts` / `/api/models/cost`)
 5. **React → CDNベースのVanilla JS SPA**: ビルド構成を単純化し、同一Pagesプロジェクト内でAPI+UIを完結
@@ -77,12 +81,15 @@
 
 ## 未実装(次の開発ステップ)
 - [x] OpenAI API 接続 — Yuto(gpt-5)の実AI執筆/リライト、Mio(gpt-5-mini)の実AI法務審査が稼働中
-- [ ] Riko/Kaiの実LLM化(情報収集ソース接続とセットで実装予定)
+- [x] Rikoの実LLM化 — RSS/Reddit実巡回 + gpt-5-miniによるネタ選定・日本向けアレンジが稼働中(`src/sources.ts` / `src/riko.ts`)
+- [ ] Kaiの実LLM化(翻訳タスクの自動化)
 - [x] X API 直接接続 — OAuth1.0a署名実装済み。`X_API_KEY`/`X_API_SECRET`/`X_ACCESS_TOKEN`/`X_ACCESS_TOKEN_SECRET` の4シークレット登録で自動投稿が有効化(未登録時はコピペ半自動運用)
   - ※Buffer APIは新規開発者受付終了のため、指示書のBuffer経由構成からX API直接接続に変更
 - [ ] note Browser Rendering(有料プラン+専用Workerが必要)
-- [ ] Reddit/YouTube/RSS の実巡回(Rikoのソース収集)
-- [ ] Cloudflare Access による取締役認証(本番デプロイ時)
+- [x] Reddit/RSS の実巡回 — 指示書§04の12 subreddit + 4 RSSフィードを巡回(subredditは日替わり6つローテーション)
+- [ ] YouTube/X監視アカウントの巡回(YouTube Data APIキー / X APIキー取得後に有効化)
+- [x] Cron自動サイクル — 朝: Riko巡回でネタ収集→ゲート① / 夕: 承認済みネタからYutoが6枠(1/3/5/8/9/10)を自動執筆→ゲート②。GitHub Actionsで定時実行
+- [x] アクセス制限 — Gensparkサインインの許可リスト方式(d.omori@dissectera.com のみ許可、`/api/cron/**` は別途CRON_SECRET認証)
 - [x] 画像生成連携(Aki) — gpt-image-2でブランド準拠画像を生成しR2に保存。「画像」タブで操作
 - [x] 画像QA(Mio) — GPT-5 visionで誤字/法令/権利/ブランド準拠を自動審査。生成時に自動実行+再審査ボタン
 
@@ -93,6 +100,7 @@
 4. **QAチェック**: 自分で書いた投稿文を貼ると、Mioが禁止表現を検出(例:「誰でも簡単に稼げる」→ 景表法指摘)。「Mio 実AIチェック」ボタンでGPT-5 miniによる深い審査+書き直し案も取得可能
 5. **AI執筆(Yuto)**: QAタブの「Yuto AI執筆スタジオ」でテーマを入れるとGPT-5が注釈・円換算・法令ルールを守った投稿を執筆。承認キューへの追加も可能
 6. **AIリライト**: 承認画面でQA要修正の投稿に「Yuto(AI)にリライトさせる」ボタンが出現。指摘を解消した文面に自動書き換え
+7. **自動サイクル(「朝起きたらネタが並んでいる」運用)**: 毎朝JST 06:00にRikoが海外ソースを巡回しゲート①にネタを並べる。取締役が承認すると、毎晚JST 21:00にYutoが翌日分6枠分を執筆しゲート②に並べる。承認画面の「Riko巡回を今すぐ実行」「Yutoに一括執筆させる」ボタンで手動実行も可能
 
 ## 開発
 ```bash

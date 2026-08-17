@@ -183,6 +183,7 @@ async function openWorkerModal(name) {
 /* ============ 承認ビュー ============ */
 async function renderApprove() {
   let xStatus = { connected: false };
+  let cronStatus = null;
   const [postsRes, topicsRes, notesRes, approvedRes] = await Promise.all([
     axios.get('/api/posts?status=pending'),
     axios.get('/api/topics?status=pending'),
@@ -190,6 +191,7 @@ async function renderApprove() {
     axios.get('/api/posts?status=approved')
   ]);
   try { xStatus = (await axios.get('/api/x/status')).data; } catch (e) {}
+  try { cronStatus = (await axios.get('/api/cron/status')).data; } catch (e) {}
   const posts = postsRes.data.posts;
   const topics = topicsRes.data.topics;
   const notes = notesRes.data.articles.filter((a) => a.approval_status === 'pending');
@@ -203,11 +205,15 @@ async function renderApprove() {
         ${posts.length ? `<button id="approve-all-btn" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-check-double mr-1"></i>QA通過分を一括承認</button>` : ''}
       </div>
       ${posts.length ? `<div class="grid md:grid-cols-2 gap-3">${posts.map(postCard).join('')}</div>`
-        : '<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">承認待ちの投稿はありません 🎉</p>'}
+        : `<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">承認待ちの投稿はありません 🎉<br>
+           <button id="yuto-auto-btn" class="mt-3 bg-brand-orange text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-pen-nib mr-1"></i>Yutoに承認済みネタから一括執筆させる</button></p>`}
     </section>
 
     <section id="gate-weekly">
-      <h2 class="font-bold text-lg text-brand-navy mb-3"><i class="fas fa-lightbulb mr-2"></i>ゲート① 週次企画の選定(${topics.length}案)</h2>
+      <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+        <h2 class="font-bold text-lg text-brand-navy"><i class="fas fa-lightbulb mr-2"></i>ゲート① 週次企画の選定(${topics.length}案)</h2>
+        <button id="riko-crawl-btn" class="bg-brand-navy text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-satellite-dish mr-1"></i>Riko巡回を今すぐ実行</button>
+      </div>
       ${topics.length ? `<div class="grid md:grid-cols-2 gap-3">${topics.map(topicCard).join('')}</div>`
         : '<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">選定待ちの企画はありません</p>'}
     </section>
@@ -244,7 +250,58 @@ async function renderApprove() {
       </article>`).join('')}</div>`
         : '<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">X投稿待ちの承認済み投稿はありません</p>'}
     </section>
+
+    <section id="cron-cycle">
+      <h2 class="font-bold text-lg text-brand-navy mb-3"><i class="fas fa-clock-rotate-left mr-2"></i>自動サイクル(Cron)</h2>
+      <div class="bg-white rounded-xl shadow p-4 text-sm space-y-3">
+        <div class="flex items-center gap-3 flex-wrap">
+          <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs ${cronStatus?.secretConfigured ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">
+            <span class="w-2 h-2 rounded-full ${cronStatus?.secretConfigured ? 'bg-emerald-500' : 'bg-amber-500'}"></span>
+            定時実行 ${cronStatus?.secretConfigured ? '設定済み' : '未設定(手動ボタンは利用可)'}
+          </span>
+          <span class="text-xs text-slate-500">🌅 朝: Riko巡回でネタ収集 → ゲート①へ / 🌆 夕: 承認済みネタからYutoが6枠執筆 → ゲート②へ</span>
+        </div>
+        ${cronStatus?.recentRuns?.length ? `
+        <div class="overflow-x-auto"><table class="w-full text-xs">
+          <thead><tr class="text-left text-slate-400 border-b"><th class="py-1 pr-3">日時</th><th class="py-1 pr-3">ワーカー</th><th class="py-1 pr-3">処理</th><th class="py-1 pr-3">結果</th><th class="py-1">詳細</th></tr></thead>
+          <tbody>${cronStatus.recentRuns.map((r) => {
+            let d = {}; try { d = JSON.parse(r.output_json || '{}'); } catch (e) {}
+            const detail = r.worker_name === 'riko'
+              ? `収集${d.collected ?? '-'}件 → ネタ${d.inserted ?? '-'}件投入${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`
+              : `ネタ${d.topicsUsed ?? '-'}件 → 投稿${d.postsCreated ?? '-'}本生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            return `<tr class="border-b border-slate-50"><td class="py-1 pr-3 text-slate-500">${esc((r.finished_at || '').slice(5, 16))}</td><td class="py-1 pr-3 font-bold">${r.worker_name === 'riko' ? 'Riko' : 'Yuto'}</td><td class="py-1 pr-3">${r.action.includes('crawl') ? '巡回' : '一括執筆'}${r.action.startsWith('auto') ? '(自動)' : '(手動)'}</td><td class="py-1 pr-3">${r.status === 'success' ? '<span class="text-emerald-600">成功</span>' : '<span class="text-red-500">失敗</span>'}</td><td class="py-1 text-slate-500">${esc(detail)}</td></tr>`;
+          }).join('')}</tbody>
+        </table></div>` : '<p class="text-xs text-slate-400">まだ自動サイクルの実行履歴がありません</p>'}
+      </div>
+    </section>
   </div>`;
+
+  document.getElementById('riko-crawl-btn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('riko-crawl-btn');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>巡回中(30〜60秒)...';
+    try {
+      const { data } = await axios.post('/api/riko/crawl', {}, { timeout: 180000 });
+      toast(`Riko巡回完了: ${data.collected}件収集 → ${data.inserted}件のネタを投入しました`);
+      renderApprove(); updateApprovalBadge();
+    } catch (e) {
+      toast(e.response?.data?.error || '巡回に失敗しました', 'error');
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-satellite-dish mr-1"></i>Riko巡回を今すぐ実行';
+    }
+  });
+
+  document.getElementById('yuto-auto-btn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('yuto-auto-btn');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>執筆中(1〜3分)...';
+    try {
+      const { data } = await axios.post('/api/yuto/auto-write', {}, { timeout: 300000 });
+      if (data.postsCreated > 0) toast(`Yutoが${data.postsCreated}本の投稿を生成しました(ネタ${data.topicsUsed}件使用 / $${(data.costUsd || 0).toFixed(3)})`);
+      else toast(data.errors?.[0] || '生成対象がありませんでした', 'error');
+      renderApprove(); updateApprovalBadge();
+    } catch (e) {
+      toast(e.response?.data?.error || '一括執筆に失敗しました', 'error');
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-pen-nib mr-1"></i>Yutoに承認済みネタから一括執筆させる';
+    }
+  });
 
   document.querySelectorAll('.copy-post-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
