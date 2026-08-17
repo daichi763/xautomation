@@ -568,6 +568,152 @@ async function renderAffiliate() {
   });
 }
 
+/* ============ AIコスト可視化 ============ */
+let costChart = null;
+async function renderCost() {
+  const app = document.getElementById('app');
+  app.innerHTML = '<div class="text-center py-12 text-slate-400"><i class="fas fa-spinner fa-spin text-2xl"></i></div>';
+  const { data } = await axios.get('/api/models/cost');
+  const t = data.totals;
+  const fmtUsd = (v) => '$' + v.toFixed(2);
+  const fmtJpy = (v) => '¥' + Math.round(v).toLocaleString();
+  const saving = t.oldClaudeMonthlyUsd - t.monthlyUsd;
+  const savingPct = Math.round((saving / t.oldClaudeMonthlyUsd) * 100);
+
+  const modelBadge = (m) => {
+    const colors = { 'gpt-5': 'bg-purple-100 text-purple-700 border-purple-300', 'gpt-5-mini': 'bg-blue-100 text-blue-700 border-blue-300', 'gpt-5-nano': 'bg-emerald-100 text-emerald-700 border-emerald-300' };
+    return `<span class="inline-block px-2 py-0.5 rounded-full text-xs font-bold border ${colors[m] || 'bg-slate-100 text-slate-600'}">${m}</span>`;
+  };
+
+  app.innerHTML = `
+  <div class="fade-in space-y-6">
+    <div class="flex items-center justify-between flex-wrap gap-2">
+      <h2 class="text-xl font-bold text-brand-navy"><i class="fas fa-microchip mr-2 text-brand-orange"></i>AIモデル構成 & コスト試算 (OpenAI移行プラン)</h2>
+      <span class="text-xs text-slate-400">為替: $1 = ¥${data.usdJpy}</span>
+    </div>
+
+    <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-sm">
+      <div class="font-bold text-emerald-800 mb-1"><i class="fas fa-key mr-1"></i>OpenAI APIキーで運用可能です</div>
+      <p class="text-emerald-700 text-xs leading-relaxed">Anthropicキーは不要。全ワーカーをOpenAI GPT-5ファミリー(gpt-5 / gpt-5-mini / gpt-5-nano)に置き換えた構成です。API呼び出しはOpenAI互換エンドポイント1本に統一されるため、実装もシンプルになります。</p>
+    </div>
+
+    <!-- サマリーカード -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+        <div class="text-xs text-slate-400 mb-1">1日あたり</div>
+        <div class="text-2xl font-bold text-brand-navy">${fmtUsd(t.dailyUsd)}</div>
+        <div class="text-xs text-slate-500">${fmtJpy(t.dailyUsd * data.usdJpy)}/日</div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+        <div class="text-xs text-slate-400 mb-1">月額 (30日)</div>
+        <div class="text-2xl font-bold text-brand-orange">${fmtUsd(t.monthlyUsd)}</div>
+        <div class="text-xs text-slate-500">${fmtJpy(t.monthlyJpy)}/月</div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+        <div class="text-xs text-slate-400 mb-1">旧Claude構成 (月額)</div>
+        <div class="text-2xl font-bold text-slate-400 line-through">${fmtUsd(t.oldClaudeMonthlyUsd)}</div>
+        <div class="text-xs text-slate-500">${fmtJpy(t.oldClaudeMonthlyUsd * data.usdJpy)}/月</div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm border-2 border-emerald-300 p-4">
+        <div class="text-xs text-emerald-600 mb-1 font-bold">OpenAI移行で削減</div>
+        <div class="text-2xl font-bold text-emerald-600">-${savingPct}%</div>
+        <div class="text-xs text-emerald-600">${fmtJpy(saving * data.usdJpy)}/月 お得</div>
+      </div>
+    </div>
+
+    <!-- チャート + モデル料金表 -->
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+        <h3 class="font-bold text-brand-navy text-sm mb-3"><i class="fas fa-chart-bar mr-1"></i>ワーカー別 月額コスト (USD)</h3>
+        <canvas id="cost-chart" height="230"></canvas>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+        <h3 class="font-bold text-brand-navy text-sm mb-3"><i class="fas fa-tags mr-1"></i>モデル料金表 (USD / 100万トークン)</h3>
+        <table class="w-full text-xs">
+          <thead><tr class="text-slate-400 border-b"><th class="text-left py-2">モデル</th><th class="text-left">位置づけ</th><th class="text-right">入力</th><th class="text-right">出力</th></tr></thead>
+          <tbody>
+            ${Object.entries(data.pricing).map(([id, p]) => `
+            <tr class="border-b border-slate-100">
+              <td class="py-2">${modelBadge(id)}</td>
+              <td class="text-slate-600">${esc(p.tier)}</td>
+              <td class="text-right font-mono">$${p.input.toFixed(2)}</td>
+              <td class="text-right font-mono">$${p.output.toFixed(2)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        <div class="mt-3 space-y-1">
+          ${data.byModel.map((m) => `
+          <div class="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-3 py-2">
+            <div>${modelBadge(m.model)} <span class="text-slate-500 ml-1">${m.workers.join(', ')}</span></div>
+            <div class="font-mono font-bold">${fmtUsd(m.monthlyCostUsd)}/月</div>
+          </div>`).join('')}
+        </div>
+      </div>
+    </div>
+
+    <!-- ワーカー別詳細テーブル -->
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 overflow-x-auto">
+      <h3 class="font-bold text-brand-navy text-sm mb-3"><i class="fas fa-users mr-1"></i>ワーカー別 モデル割当と試算根拠</h3>
+      <table class="w-full text-xs min-w-[900px]">
+        <thead>
+          <tr class="text-slate-400 border-b">
+            <th class="text-left py-2">ワーカー</th><th class="text-left">推奨モデル</th><th class="text-left">旧構成</th>
+            <th class="text-left">1日のタスク</th><th class="text-right">呼出/日</th><th class="text-right">トークン/日</th>
+            <th class="text-right">円/月</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.rows.map((r) => `
+          <tr class="border-b border-slate-100 hover:bg-slate-50">
+            <td class="py-2 whitespace-nowrap">${r.icon} <b>${esc(r.name)}</b><div class="text-slate-400">${esc(r.role)}</div></td>
+            <td>${modelBadge(r.model)}</td>
+            <td class="text-slate-400 line-through whitespace-nowrap">${esc(r.oldModel)}</td>
+            <td class="text-slate-600 max-w-[260px]"><div>${esc(r.dailyTasks)}</div><div class="text-[10px] text-slate-400 mt-0.5">${esc(r.reason)}</div></td>
+            <td class="text-right font-mono">${r.dailyCalls}</td>
+            <td class="text-right font-mono whitespace-nowrap">入 ${(r.dailyInputTokens / 1000).toFixed(0)}k<br>出 ${(r.dailyOutputTokens / 1000).toFixed(0)}k</td>
+            <td class="text-right font-mono font-bold text-brand-navy whitespace-nowrap">${fmtJpy(r.monthlyCostJpy)}</td>
+          </tr>`).join('')}
+        </tbody>
+        <tfoot>
+          <tr class="font-bold text-brand-navy">
+            <td class="py-2" colspan="6" class="text-right">合計</td>
+            <td class="text-right font-mono text-brand-orange">${fmtJpy(t.monthlyJpy)}/月</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <!-- 注意事項 -->
+    <div class="bg-amber-50 border border-amber-200 rounded-xl p-4">
+      <h3 class="font-bold text-amber-800 text-sm mb-2"><i class="fas fa-circle-info mr-1"></i>前提・注意事項</h3>
+      <ul class="text-xs text-amber-700 space-y-1 list-disc pl-4">
+        ${data.notes.map((n) => `<li>${esc(n)}</li>`).join('')}
+      </ul>
+    </div>
+  </div>`;
+
+  // チャート描画
+  if (costChart) { costChart.destroy(); costChart = null; }
+  const colorFor = (m) => m === 'gpt-5' ? '#9333ea' : m === 'gpt-5-mini' ? '#2563eb' : '#059669';
+  costChart = new Chart(document.getElementById('cost-chart'), {
+    type: 'bar',
+    data: {
+      labels: data.rows.map((r) => `${r.name} (${r.role.split('/')[0]})`),
+      datasets: [{
+        label: '月額コスト (USD)',
+        data: data.rows.map((r) => +r.monthlyCostUsd.toFixed(3)),
+        backgroundColor: data.rows.map((r) => colorFor(r.model)),
+        borderRadius: 6,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => ` $${ctx.raw}/月 (¥${Math.round(ctx.raw * data.usdJpy).toLocaleString()})` } } },
+      scales: { x: { ticks: { callback: (v) => '$' + v } } },
+    },
+  });
+}
+
 /* ============ ルーティング ============ */
 function navigate(view) {
   currentView = view;
@@ -581,6 +727,7 @@ function navigate(view) {
   else if (view === 'kpi') renderKPI();
   else if (view === 'qa') renderQA();
   else if (view === 'affiliate') renderAffiliate();
+  else if (view === 'cost') renderCost();
 }
 window.navigate = navigate;
 

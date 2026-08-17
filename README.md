@@ -54,11 +54,24 @@
 元の指示書はAI作成のため、以下を現実的な構成に調整しました:
 1. **Cloudflare Queues → D1テーブル(task_queue)**: Queues は Pages では利用不可+有料機能のため、D1で同等のキュー機構を実装(挙動は同一、後からWorkers移行可)
 2. **Cron Triggers → デモシミュレータ**: Pages では Cron 未対応。`/api/simulate/tick` で稼働感を再現。本番でLLM自動実行が必要になったら別Workerとして切り出す構成を推奨
-3. **LLM/Buffer/note自動投稿は未接続**: APIキー(Anthropic/Buffer)とnote認証情報が必要なため、タスク投入までを実装。キー提供後に接続可能
-4. **React → CDNベースのVanilla JS SPA**: ビルド構成を単純化し、同一Pagesプロジェクト内でAPI+UIを完結
+3. **LLM/Buffer/note自動投稿は未接続**: APIキー(OpenAI/Buffer)とnote認証情報が必要なため、タスク投入までを実装。キー提供後に接続可能
+4. **LLMをAnthropic Claude→OpenAI GPT-5ファミリに変更**: ユーザーのOpenAI APIキーで運用可能に。モデル割当とコスト試算はダッシュボードの「AIコスト」タブで可視化(`src/model-plan.ts` / `/api/models/cost`)
+5. **React → CDNベースのVanilla JS SPA**: ビルド構成を単純化し、同一Pagesプロジェクト内でAPI+UIを完結
+
+## AIモデル構成(OpenAI移行プラン)
+**OpenAI APIキーで運用可能です(Anthropicキー不要)**。詳細はダッシュボードの「AIコスト」タブ参照。
+
+| モデル | 担当ワーカー | 位置づけ |
+|---|---|---|
+| **gpt-5** | Yuto(ライター) | 収益の生命線である投稿・note執筆は最上位モデル |
+| **gpt-5-mini** | Riko(企画) / Kai(翻訳) / Rui(分析) / Mio(QA) | 中程度の推論が必要な作業 |
+| **gpt-5-nano** | Alex(PM) / Aki(画像) / Sora(SNS) / Nana(秘書) | 定型・オーケストレーション作業 |
+
+- **試算コスト**: 約 $0.40/日 → 約 $12/月(約¥1,800/月) ※旧Claude構成($45/月)比で約73%削減
+- 料金・トークン前提は `src/model-plan.ts` に一元管理(変更すればUIに即反映)
 
 ## 未実装(次の開発ステップ)
-- [ ] Anthropic API 接続(Riko/Kai/Yuto/Mioの実LLM化)— `ANTHROPIC_API_KEY` シークレットが必要
+- [ ] OpenAI API 接続(全ワーカーの実LLM化)— `OPENAI_API_KEY` シークレットが必要(モデル割当は「AIコスト」タブの通り)
 - [ ] Buffer API 連携(Soraの実予約投稿)— `BUFFER_TOKEN` が必要
 - [ ] note Browser Rendering(有料プラン+専用Workerが必要)
 - [ ] Reddit/YouTube/RSS の実巡回(Rikoのソース収集)

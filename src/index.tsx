@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { runQaCheck, FORBIDDEN_RULES } from './qa-rules'
 import { embedAffiliateLinks, suggestAnnotations, type AffiliateLink, type GlossaryEntry } from './affiliate'
+import { computeCostPlan } from './model-plan'
 
 type Bindings = {
   DB: D1Database
@@ -149,6 +150,11 @@ app.post('/api/notes/:id/publish', async (c) => {
 // ============================================================
 // KPI
 // ============================================================
+
+// AIモデル構成 & コスト試算 (OpenAI移行プラン)
+app.get('/api/models/cost', (c) => {
+  return c.json(computeCostPlan())
+})
 
 app.get('/api/kpi', async (c) => {
   const { DB } = c.env
@@ -335,6 +341,7 @@ app.get('/', (c) => {
         <button data-view="kpi" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-chart-line mr-1"></i>KPI</button>
         <button data-view="qa" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-shield-halved mr-1"></i>QAチェック</button>
         <button data-view="affiliate" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-link mr-1"></i>アフィリンク</button>
+        <button data-view="cost" class="nav-btn px-3 py-2 rounded-lg hover:bg-white/10"><i class="fas fa-microchip mr-1"></i>AIコスト</button>
       </nav>
     </div>
   </header>
