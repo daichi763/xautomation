@@ -70,8 +70,14 @@
 - **試算コスト**: 約 $0.40/日 → 約 $12/月(約¥1,800/月) ※旧Claude構成($45/月)比で約73%削減
 - 料金・トークン前提は `src/model-plan.ts` に一元管理(変更すればUIに即反映)
 
+### 実LLM接続(稼働中)
+- ヘルパー: `src/llm.ts` (fetchのみ使用、Workers完全対応、`reasoning_effort: low` で推論トークンを抑制)
+- API: `GET /api/llm/status` / `POST /api/llm/write` (Yuto執筆) / `POST /api/llm/qa` (Mio審査) / `POST /api/posts/:id/rewrite` (Yutoリライト)
+- キー管理: ローカル=`.dev.vars`(gitignore済み) / 本番=Workerシークレット `OPENAI_API_KEY`。**キーはコード・Gitに一切含まない**
+
 ## 未実装(次の開発ステップ)
-- [ ] OpenAI API 接続(全ワーカーの実LLM化)— `OPENAI_API_KEY` シークレットが必要(モデル割当は「AIコスト」タブの通り)
+- [x] OpenAI API 接続 — Yuto(gpt-5)の実AI執筆/リライト、Mio(gpt-5-mini)の実AI法務審査が稼働中
+- [ ] Riko/Kaiの実LLM化(情報収集ソース接続とセットで実装予定)
 - [ ] Buffer API 連携(Soraの実予約投稿)— `BUFFER_TOKEN` が必要
 - [ ] note Browser Rendering(有料プラン+専用Workerが必要)
 - [ ] Reddit/YouTube/RSS の実巡回(Rikoのソース収集)
@@ -82,7 +88,9 @@
 1. **オフィス**: 9人の稼働状況を眺める。デスクをクリックすると実行ログが見える
 2. **承認**: オレンジのバッジが付いたら承認画面へ。「QA通過分を一括承認」でスマホ5分運用。QA要修正(枠8など)は指摘内容を確認して個別判断
 3. **KPI**: フォロワーと売上の推移を確認
-4. **QAチェック**: 自分で書いた投稿文を貼ると、Mioが禁止表現を検出(例:「誰でも簡単に稼げる」→ 景表法指摘)
+4. **QAチェック**: 自分で書いた投稿文を貼ると、Mioが禁止表現を検出(例:「誰でも簡単に稼げる」→ 景表法指摘)。「Mio 実AIチェック」ボタンでGPT-5 miniによる深い審査+書き直し案も取得可能
+5. **AI執筆(Yuto)**: QAタブの「Yuto AI執筆スタジオ」でテーマを入れるとGPT-5が注釈・円換算・法令ルールを守った投稿を執筆。承認キューへの追加も可能
+6. **AIリライト**: 承認画面でQA要修正の投稿に「Yuto(AI)にリライトさせる」ボタンが出現。指摘を解消した文面に自動書き換え
 
 ## 開発
 ```bash

@@ -3,9 +3,11 @@ import { cors } from 'hono/cors'
 import { runQaCheck, FORBIDDEN_RULES } from './qa-rules'
 import { embedAffiliateLinks, suggestAnnotations, type AffiliateLink, type GlossaryEntry } from './affiliate'
 import { computeCostPlan } from './model-plan'
+import { callOpenAI, YUTO_SYSTEM, MIO_SYSTEM } from './llm'
 
 type Bindings = {
   DB: D1Database
+  OPENAI_API_KEY?: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -154,6 +156,109 @@ app.post('/api/notes/:id/publish', async (c) => {
 // AIモデル構成 & コスト試算 (OpenAI移行プラン)
 app.get('/api/models/cost', (c) => {
   return c.json(computeCostPlan())
+})
+
+// ============================================================
+// 実LLM接続 (OpenAI GPT-5ファミリ)
+// ============================================================
+
+// LLM接続状態
+app.get('/api/llm/status', (c) => {
+  const key = c.env.OPENAI_API_KEY
+  return c.json({
+    connected: !!key,
+    provider: 'OpenAI',
+    keyHint: key ? `sk-...${key.slice(-4)}` : null,
+  })
+})
+
+// Yuto(ライター/gpt-5)に新規投稿を執筆させる
+app.post('/api/llm/write', async (c) => {
+  const { DB } = c.env
+  const { theme, slot, save } = await c.req.json<{ theme: string; slot?: number; save?: boolean }>()
+  if (!theme?.trim()) return c.json({ error: 'テーマを入力してください' }, 400)
+
+  // 用語集をプロンプトに注入(注釈の一貫性確保)
+  const gl = await DB.prepare('SELECT term, annotation FROM glossary LIMIT 30').all()
+  const glossaryNote = (gl.results as any[]).map((g) => `※${g.term}=${g.annotation}`).join('\n')
+
+  const userPrompt = `以下のテーマでX投稿を1本執筆してください。\n\nテーマ: ${theme}\n${slot ? `投稿枠: 枠${slot}` : ''}\n\n▓参考: 既存の用語注釈集(同じ固有名詞はこの注釈を使う)\n${glossaryNote}`
+
+  const result = await callOpenAI(c.env.OPENAI_API_KEY || '', 'gpt-5', YUTO_SYSTEM, userPrompt, 3000)
+  if (!result.ok) return c.json({ error: result.error }, 502)
+
+  // キーワードQAも自動実行
+  const qa = runQaCheck(result.content, false)
+
+  let savedPostId: string | null = null
+  if (save) {
+    savedPostId = `p-llm-${Date.now()}`
+    await DB.prepare(
+      "INSERT INTO x_posts (post_id, slot_number, scheduled_at, body, approval_status, qa_status, qa_issues) VALUES (?, ?, datetime('now', '+1 day'), ?, 'pending', ?, ?)"
+    ).bind(savedPostId, slot || 1, result.content, qa.status, JSON.stringify(qa.issues)).run()
+    await DB.prepare("INSERT INTO worker_logs (worker_name, action, detail) VALUES ('yuto', 'llm_write', ?)")
+      .bind(`OpenAI(gpt-5)で執筆: ${theme.slice(0, 40)}`).run()
+  }
+
+  return c.json({
+    draft: result.content,
+    model: result.model,
+    usage: result.usage,
+    costUsd: result.costUsd,
+    qa,
+    savedPostId,
+  })
+})
+
+// Mio(QA/gpt-5-mini)に法務チェックさせる(キーワードエンジン+LLMの二重チェック)
+app.post('/api/llm/qa', async (c) => {
+  const { text } = await c.req.json<{ text: string }>()
+  if (!text?.trim()) return c.json({ error: 'テキストを入力してください' }, 400)
+
+  const keywordQa = runQaCheck(text, /\bhttps?:\/\//.test(text))
+  const result = await callOpenAI(c.env.OPENAI_API_KEY || '', 'gpt-5-mini', MIO_SYSTEM, `以下の投稿文を審査してください:\n\n${text}`, 2000)
+  if (!result.ok) return c.json({ error: result.error, keywordQa }, 502)
+
+  let llmVerdict: any = null
+  try {
+    const jsonText = result.content.replace(/^```json?\s*/,'').replace(/```\s*$/,'').trim()
+    llmVerdict = JSON.parse(jsonText)
+  } catch {
+    llmVerdict = { verdict: 'unknown', raw: result.content }
+  }
+
+  return c.json({
+    keywordQa,
+    llm: llmVerdict,
+    model: result.model,
+    usage: result.usage,
+    costUsd: result.costUsd,
+  })
+})
+
+// 既存投稿をYutoにリライトさせる(QA指摘を反映)
+app.post('/api/posts/:id/rewrite', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const post: any = await DB.prepare('SELECT * FROM x_posts WHERE post_id = ?').bind(id).first()
+  if (!post) return c.json({ error: 'not found' }, 404)
+
+  const issues = post.qa_issues ? JSON.parse(post.qa_issues) : []
+  const issueText = issues.length
+    ? issues.map((i: any) => `- ${i.law || ''} ${i.reason || i.message || ''}`).join('\n')
+    : '(特になし。より読みやすく・法令遵守で磨いてください)'
+
+  const userPrompt = `以下の投稿文を、QA指摘を解消するように書き直してください。元のネタ・構成は活かすこと。\n\n▓元の投稿:\n${post.body}\n\n▓QA指摘:\n${issueText}`
+  const result = await callOpenAI(c.env.OPENAI_API_KEY || '', 'gpt-5', YUTO_SYSTEM, userPrompt, 3000)
+  if (!result.ok) return c.json({ error: result.error }, 502)
+
+  const qa = runQaCheck(result.content, result.content.includes('#PR'))
+  await DB.prepare('UPDATE x_posts SET body = ?, qa_status = ?, qa_issues = ? WHERE post_id = ?')
+    .bind(result.content, qa.status, JSON.stringify(qa.issues), id).run()
+  await DB.prepare("INSERT INTO worker_logs (worker_name, action, detail) VALUES ('yuto', 'llm_rewrite', ?)")
+    .bind(`OpenAI(gpt-5)でリライト: ${id}`).run()
+
+  return c.json({ post_id: id, body: result.content, qa, model: result.model, usage: result.usage, costUsd: result.costUsd })
 })
 
 app.get('/api/kpi', async (c) => {

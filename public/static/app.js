@@ -243,6 +243,7 @@ function postCard(p) {
     <p class="text-sm whitespace-pre-wrap leading-relaxed flex-1">${esc(p.body)}</p>
     ${issues.length ? `<div class="bg-amber-50 border border-amber-200 rounded-lg p-2 text-xs text-amber-800">${issues.map((i) => `<div><b>[${esc(i.rule)}]</b> ${esc(i.detail)}</div>`).join('')}</div>` : ''}
     ${isAffiliateSlot ? `<button class="embed-affiliate-btn w-full bg-brand-orange/10 text-brand-orange border border-brand-orange/40 py-1.5 rounded-lg text-xs font-bold hover:bg-brand-orange/20" data-id="${esc(p.post_id)}"><i class="fas fa-link mr-1"></i>アフィリンクを自動埋め込み</button>` : ''}
+    ${p.qa_status === 'needs_fix' || p.qa_status === 'ng' ? `<button class="llm-rewrite-btn w-full bg-purple-50 text-purple-700 border border-purple-300 py-1.5 rounded-lg text-xs font-bold hover:bg-purple-100" data-id="${esc(p.post_id)}"><i class="fas fa-wand-magic-sparkles mr-1"></i>Yuto(AI)にリライトさせる</button>` : ''}
     <div class="flex gap-2 pt-1">
       <button class="decision-btn flex-1 bg-emerald-600 text-white py-1.5 rounded-lg text-xs font-bold hover:opacity-90" data-kind="post" data-id="${esc(p.post_id)}" data-decision="approved"><i class="fas fa-check mr-1"></i>承認</button>
       <button class="decision-btn flex-1 bg-slate-200 text-slate-700 py-1.5 rounded-lg text-xs font-bold hover:bg-slate-300" data-kind="post" data-id="${esc(p.post_id)}" data-decision="rejected"><i class="fas fa-rotate-left mr-1"></i>差戻</button>
@@ -291,6 +292,21 @@ function noteCard(n) {
 }
 
 function bindDecisionButtons() {
+  document.querySelectorAll('.llm-rewrite-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Yutoがリライト中...(10〜30秒)';
+      try {
+        const { data } = await axios.post(`/api/posts/${btn.dataset.id}/rewrite`);
+        toast(data.qa.status === 'ok' ? 'リライト完了: QA通過になりました' : `リライト完了 (QA: ${data.qa.status})`);
+        renderApprove();
+      } catch (e) {
+        toast(e.response?.data?.error || 'リライトに失敗しました', 'error');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-wand-magic-sparkles mr-1"></i>Yuto(AI)にリライトさせる';
+      }
+    });
+  });
   document.querySelectorAll('.embed-affiliate-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
       btn.disabled = true;
@@ -419,20 +435,118 @@ async function renderKPI() {
 
 /* ============ QAチェックビュー ============ */
 async function renderQA() {
+  let llmStatus = { connected: false, keyHint: null };
+  try { llmStatus = (await axios.get('/api/llm/status')).data; } catch (e) {}
+
   $app.innerHTML = `
   <div class="fade-in max-w-3xl mx-auto space-y-5">
-    <h2 class="font-bold text-lg text-brand-navy"><i class="fas fa-shield-halved mr-2"></i>QAチェッカー(Mio)</h2>
-    <p class="text-sm text-slate-500">投稿予定の本文を貼り付けると、Mioが禁止表現・法令リスク(薬機法/景表法/金商法/ステマ規制)をチェックします。</p>
+    <h2 class="font-bold text-lg text-brand-navy"><i class="fas fa-shield-halved mr-2"></i>QAチェッカー(Mio)& AI執筆(Yuto)</h2>
+    <div class="flex items-center gap-2 text-xs">
+      <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full ${llmStatus.connected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}">
+        <span class="w-2 h-2 rounded-full ${llmStatus.connected ? 'bg-emerald-500' : 'bg-slate-400'}"></span>
+        OpenAI ${llmStatus.connected ? `接続中 (${llmStatus.keyHint})` : '未接続'}
+      </span>
+    </div>
+
+    <!-- Yuto AI執筆スタジオ -->
+    <section id="yuto-studio" class="bg-white rounded-xl shadow p-4 space-y-3 border-2 border-brand-orange/30">
+      <h3 class="font-bold text-sm text-brand-navy"><i class="fas fa-pen-nib mr-1 text-brand-orange"></i>Yuto AI執筆スタジオ <span class="text-[10px] font-normal text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200">gpt-5</span></h3>
+      <p class="text-xs text-slate-500">テーマを入れると、Yuto(GPT-5)が注釈・円換算・法令ルールを守った投稿を執筆します。執筆後は自動でキーワードQAも実行。</p>
+      <div class="flex gap-2 flex-wrap">
+        <input id="yuto-theme" class="flex-1 min-w-[240px] border border-slate-300 rounded-lg p-2.5 text-sm" placeholder="例: 海外で流行しているFaceless YouTube(顔出しなし動画)の始め方">
+        <select id="yuto-slot" class="border border-slate-300 rounded-lg p-2 text-sm">
+          ${Array.from({length:12},(_,i)=>`<option value="${i+1}">枠${i+1}</option>`).join('')}
+        </select>
+      </div>
+      <div class="flex gap-2">
+        <button id="yuto-write-btn" class="bg-brand-orange text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:opacity-90" ${llmStatus.connected ? '' : 'disabled'}><i class="fas fa-wand-magic-sparkles mr-1"></i>Yutoに執筆させる</button>
+      </div>
+      <div id="yuto-result"></div>
+    </section>
+
     <section id="qa-form" class="bg-white rounded-xl shadow p-4 space-y-3">
+      <h3 class="font-bold text-sm text-brand-navy"><i class="fas fa-magnifying-glass mr-1"></i>投稿文チェック</h3>
       <textarea id="qa-text" rows="6" class="w-full border border-slate-300 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand-orange" placeholder="例: この方法なら誰でも簡単に稼げる!絶対おすすめです!"></textarea>
       <label class="flex items-center gap-2 text-sm text-slate-600">
         <input type="checkbox" id="qa-affiliate" class="rounded">
         アフィリエイトリンクを含む投稿
       </label>
-      <button id="qa-check-btn" class="bg-brand-navy text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-magnifying-glass mr-1"></i>チェック実行</button>
+      <div class="flex gap-2 flex-wrap">
+        <button id="qa-check-btn" class="bg-brand-navy text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-bolt mr-1"></i>キーワードチェック(即時)</button>
+        <button id="qa-llm-btn" class="bg-blue-600 text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:opacity-90" ${llmStatus.connected ? '' : 'disabled'}><i class="fas fa-brain mr-1"></i>Mio 実AIチェック <span class="text-[10px] opacity-80">(gpt-5-mini)</span></button>
+      </div>
     </section>
     <section id="qa-result"></section>
   </div>`;
+
+  // Yuto執筆
+  document.getElementById('yuto-write-btn').addEventListener('click', async () => {
+    const theme = document.getElementById('yuto-theme').value.trim();
+    if (!theme) { toast('テーマを入力してください', 'error'); return; }
+    const btn = document.getElementById('yuto-write-btn');
+    const box = document.getElementById('yuto-result');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Yutoが執筆中...(10〜30秒)';
+    try {
+      const { data } = await axios.post('/api/llm/write', { theme, slot: +document.getElementById('yuto-slot').value });
+      const qaBadge = data.qa.status === 'ok'
+        ? '<span class="text-emerald-600 font-bold"><i class="fas fa-circle-check mr-1"></i>キーワードQA: OK</span>'
+        : `<span class="text-amber-600 font-bold"><i class="fas fa-triangle-exclamation mr-1"></i>キーワードQA: ${data.qa.status}(${data.qa.issues.length}件)</span>`;
+      box.innerHTML = `
+      <div class="fade-in mt-3 space-y-2">
+        <div class="bg-slate-50 border border-slate-200 rounded-lg p-3">
+          <pre id="yuto-draft" class="whitespace-pre-wrap text-sm font-sans">${esc(data.draft)}</pre>
+        </div>
+        <div class="flex items-center justify-between flex-wrap gap-2 text-xs">
+          <div>${qaBadge}<span class="text-slate-400 ml-3">${esc(data.model)} / ${data.usage ? data.usage.total_tokens + ' tokens' : ''} / 約$${(data.costUsd || 0).toFixed(4)}</span></div>
+          <button id="yuto-save-btn" class="bg-brand-navy text-white px-4 py-1.5 rounded-lg font-bold hover:opacity-90"><i class="fas fa-inbox mr-1"></i>承認キューに追加</button>
+        </div>
+      </div>`;
+      document.getElementById('yuto-save-btn').addEventListener('click', async () => {
+        const { data: d2 } = await axios.post('/api/llm/write', { theme, slot: +document.getElementById('yuto-slot').value, save: true });
+        toast(`承認キューに追加しました (${d2.savedPostId})`);
+        updateApprovalBadge();
+      });
+    } catch (e) {
+      box.innerHTML = `<div class="mt-3 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">エラー: ${esc(e.response?.data?.error || e.message)}</div>`;
+    } finally {
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-wand-magic-sparkles mr-1"></i>Yutoに執筆させる';
+    }
+  });
+
+  // Mio 実LLMチェック
+  document.getElementById('qa-llm-btn').addEventListener('click', async () => {
+    const text = document.getElementById('qa-text').value.trim();
+    if (!text) { toast('本文を入力してください', 'error'); return; }
+    const btn = document.getElementById('qa-llm-btn');
+    const box = document.getElementById('qa-result');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Mioが審査中...';
+    try {
+      const { data } = await axios.post('/api/llm/qa', { text });
+      const v = data.llm?.verdict || 'unknown';
+      const vColor = v === 'ok' ? 'emerald' : v === 'ng' ? 'red' : 'amber';
+      const vLabel = v === 'ok' ? 'OK — 問題なし' : v === 'ng' ? 'NG(公開停止)' : v === 'needs_fix' ? '要修正' : '判定不能';
+      box.innerHTML = `
+      <div class="fade-in bg-${vColor}-50 border border-${vColor}-300 rounded-xl p-5 space-y-3">
+        <p class="font-bold text-${vColor}-700"><i class="fas fa-brain mr-1"></i>Mio(AI)判定: ${vLabel}</p>
+        ${(data.llm?.issues || []).map((i) => `
+        <div class="bg-white rounded-lg p-3 text-sm">
+          <div class="font-bold text-brand-navy">[${esc(i.law || '')}] 「${esc(i.quote || '')}」</div>
+          <div class="text-xs text-slate-700 mt-1">${esc(i.reason || '')}</div>
+          ${i.suggestion ? `<div class="text-xs text-emerald-700 mt-1"><i class="fas fa-lightbulb mr-1"></i>修正案: ${esc(i.suggestion)}</div>` : ''}
+        </div>`).join('')}
+        ${data.llm?.rewrite ? `
+        <div class="bg-white rounded-lg p-3">
+          <div class="text-[10px] text-slate-400 mb-1">Mioによる書き直し案:</div>
+          <pre class="whitespace-pre-wrap text-sm font-sans">${esc(data.llm.rewrite)}</pre>
+        </div>` : ''}
+        <div class="text-[10px] text-slate-400">${esc(data.model || '')} / ${data.usage ? data.usage.total_tokens + ' tokens' : ''} / 約$${(data.costUsd || 0).toFixed(4)}</div>
+      </div>`;
+    } catch (e) {
+      box.innerHTML = `<div class="fade-in bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">エラー: ${esc(e.response?.data?.error || e.message)}</div>`;
+    } finally {
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-brain mr-1"></i>Mio 実AIチェック <span class="text-[10px] opacity-80">(gpt-5-mini)</span>';
+    }
+  });
 
   document.getElementById('qa-check-btn').addEventListener('click', async () => {
     const text = document.getElementById('qa-text').value.trim();
