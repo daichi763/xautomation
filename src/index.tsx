@@ -5,7 +5,7 @@ import { embedAffiliateLinks, resolveClickBase, suggestAnnotations, type Affilia
 import { computeCostPlan } from './model-plan'
 import { callOpenAI, YUTO_SYSTEM, MIO_SYSTEM } from './llm'
 import { buildImagePrompt, generateImage, qaImage, IMAGE_SIZE, IMAGE_COST_USD, type ImagePurpose } from './image-gen'
-import { getXCredentials } from './x-api'
+import { getXCredentials, xWeightedLength, X_WEIGHT_LIMIT } from './x-api'
 import { runRikoCrawl } from './riko'
 import { runDailyPipeline, runHourlyTick, SLOT_TABLE } from './cron'
 import { publishPostToX } from './sora'
@@ -206,9 +206,22 @@ app.post('/api/replies/:id/decision', async (c) => {
   const id = c.req.param('id')
   const { decision, body } = await c.req.json<{ decision: 'approved' | 'rejected'; body?: string }>()
   if (!['approved', 'rejected'].includes(decision)) return c.json({ error: 'invalid decision' }, 400)
+  if (decision === 'approved') {
+    // 承認時の文字数ガード: weighted 280超は送信が必ず失敗するため承認自体を拒否
+    // (編集後本文があればそれを、なければ既存の下書きを検証)
+    let finalBody = body && body.trim() ? body.trim() : ''
+    if (!finalBody) {
+      const row = await DB.prepare('SELECT draft_body FROM x_replies WHERE reply_id = ?').bind(id).first<{ draft_body: string }>()
+      finalBody = String(row?.draft_body || '')
+    }
+    const weight = xWeightedLength(finalBody)
+    if (weight > X_WEIGHT_LIMIT) {
+      return c.json({ error: `文字数が上限を超えています(${weight}/280 — 日本語約140字)。短く編集してから承認してください`, weight, limit: X_WEIGHT_LIMIT }, 400)
+    }
+  }
   if (decision === 'approved' && body && body.trim()) {
-    // 承認時に本文を編集して送る場合
-    await DB.prepare('UPDATE x_replies SET approval_status = ?, draft_body = ? WHERE reply_id = ?').bind(decision, body.trim(), id).run()
+    // 承認時に本文を編集して送る場合(検証済みなのでqa_statusもokに引き上げ)
+    await DB.prepare("UPDATE x_replies SET approval_status = ?, draft_body = ?, qa_status = 'ok' WHERE reply_id = ?").bind(decision, body.trim(), id).run()
   } else {
     await DB.prepare('UPDATE x_replies SET approval_status = ? WHERE reply_id = ?').bind(decision, id).run()
   }

@@ -214,6 +214,18 @@ export async function publishApprovedReplies(
 
   for (const r of (due.results || []) as any[]) {
     try {
+      // 送信前ガード: 文字数超過は送信しても必ず失敗するため、API課金せず即rejected化
+      // (承認時にサーバ側でも検証するが、旧データ・別経路への防衛線として残す)
+      const weight = xWeightedLength(String(r.draft_body || ''))
+      if (weight > X_WEIGHT_LIMIT) {
+        result.errors.push(`${r.mention_author}: 文字数超過(${weight}/280)のため送信中止`)
+        await db.prepare("UPDATE x_replies SET approval_status = 'rejected' WHERE reply_id = ?").bind(r.reply_id).run()
+        await db.prepare(
+          "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('sora', 'reply_publish', 'error', ?, CURRENT_TIMESTAMP)",
+        ).bind(`${r.mention_author} への返信を却下: 文字数超過(${weight}/280)。編集して再承認してください`).run()
+        continue
+      }
+
       const post = await postTweet(creds, r.draft_body, undefined, undefined, r.mention_tweet_id)
       if (post.ok) {
         result.published++
@@ -225,13 +237,16 @@ export async function publishApprovedReplies(
         ).bind(`${r.mention_author} へ返信: ${post.tweetUrl}`).run()
       } else {
         result.errors.push(`${r.mention_author}: ${post.error}`)
-        // 返信先ツイートが削除済み等の場合は rejected にして再試行を止める
-        if (/not found|deleted|404/i.test(post.error || '')) {
+        // 恒久エラー(リトライしても解決しない)は rejected にして無限リトライを防ぐ。
+        // 一時的エラー(レート制限・5xx・ネットワーク)のみ次回リトライに残す。
+        const err = post.error || ''
+        const isTransient = /rate limit|too many requests|429|50[0-9]|service unavailable|timeout|ネットワークエラー/i.test(err)
+        if (!isTransient) {
           await db.prepare("UPDATE x_replies SET approval_status = 'rejected' WHERE reply_id = ?").bind(r.reply_id).run()
         }
         await db.prepare(
           "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('sora', 'reply_publish', 'error', ?, CURRENT_TIMESTAMP)",
-        ).bind(`${r.mention_author} への返信失敗: ${post.error}`).run()
+        ).bind(`${r.mention_author} への返信失敗: ${err}${isTransient ? '(次回リトライ)' : '(却下済み — 内容を確認してください)'}`).run()
       }
       await new Promise((resolve) => setTimeout(resolve, 1500))
     } catch (e: any) {

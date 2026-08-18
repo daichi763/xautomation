@@ -17,7 +17,7 @@ import { embedAffiliateLinks, resolveClickBase, type AffiliateLink } from './aff
 import { collectMentionsAndDraft, publishApprovedReplies, type ReplyCollectResult, type ReplyPublishResult } from './replies'
 import { runSlotOptimize, loadSlotOverrides } from './slot-optimizer'
 import { runPostRecycle } from './recycle'
-import { getXCredentials, retweet, fetchMyProfile } from './x-api'
+import { getXCredentials, retweet, fetchMyProfile, fetchMyTweetsMetrics } from './x-api'
 
 // 指示書§05 12枠タイムテーブル
 export const SLOT_TABLE: { slot: number; time: string; type: string; limit: string }[] = [
@@ -564,17 +564,17 @@ export async function runSelfRepost(
       .first()
     if (already) return result
 
-    // 当日(JST)公開済み・未RT・tweet_idありのインプ最上位1本
-    const top: any = await db
+    // 当日(JST)公開済み・未RT・tweet_idありの候補があるか先に確認(なければAPIコスト0で終了)
+    const anyCandidate = await db
       .prepare(
-        `SELECT post_id, buffer_id, impressions FROM x_posts
+        `SELECT post_id FROM x_posts
          WHERE published_at IS NOT NULL AND buffer_id IS NOT NULL
            AND self_reposted_at IS NULL
            AND date(published_at, '+9 hours') = date('now', '+9 hours')
-         ORDER BY impressions DESC, published_at ASC LIMIT 1`,
+         LIMIT 1`,
       )
       .first()
-    if (!top?.buffer_id) return result // 当日の公開済み投稿なし
+    if (!anyCandidate) return result // 当日の公開済み投稿なし
 
     // userIdはapp_settingsキャッシュ優先(User Read $0.010節約)
     let userId = ''
@@ -593,6 +593,34 @@ export async function runSelfRepost(
       await db.prepare("INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('x_user_id', ?, CURRENT_TIMESTAMP)")
         .bind(JSON.stringify({ userId, username: prof.username || '' })).run()
     }
+
+    // 当日分の実インプを取得して書き戻す(Owned Read 約$0.05)。
+    // 朝のKPI収集は前日までのデータのため、これがないと当日投稿は全てimpressions=0で
+    // 「インプ上位」でなく「最初の投稿」が常に選ばれてしまう。
+    // 取得失敗時はDB上の値(=0の可能性大)にフォールバックして続行。
+    try {
+      const metrics = await fetchMyTweetsMetrics(creds, userId)
+      if (metrics.ok) {
+        for (const t of metrics.perTweet || []) {
+          try {
+            await db.prepare('UPDATE x_posts SET impressions = ?, engagements = ? WHERE buffer_id = ?')
+              .bind(t.impressions, t.engagements, t.tweetId).run()
+          } catch { /* 個別失敗は無視 */ }
+        }
+      }
+    } catch { /* メトリクス取得失敗でもRT自体は続行 */ }
+
+    // 書き戻し後のインプ最上位1本を選定
+    const top: any = await db
+      .prepare(
+        `SELECT post_id, buffer_id, impressions FROM x_posts
+         WHERE published_at IS NOT NULL AND buffer_id IS NOT NULL
+           AND self_reposted_at IS NULL
+           AND date(published_at, '+9 hours') = date('now', '+9 hours')
+         ORDER BY impressions DESC, published_at ASC LIMIT 1`,
+      )
+      .first()
+    if (!top?.buffer_id) return result
 
     const rt = await retweet(creds, userId, String(top.buffer_id))
     if (!rt.ok) {

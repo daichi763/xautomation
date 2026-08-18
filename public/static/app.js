@@ -424,7 +424,7 @@ async function renderApprove() {
         toast(decision === 'approved' ? '返信を承認しました(次の自動サイクルで送信)' : '返信を却下しました');
         renderApprove();
       } catch (e) {
-        toast('処理に失敗しました', 'error');
+        toast(e?.response?.data?.error || '処理に失敗しました', 'error');
       }
     });
   });
