@@ -72,14 +72,103 @@ export interface XPostResult {
   error?: string
 }
 
-// テキスト投稿 (画像付きは事前にuploadMediaでmedia_id取得 / quoteTweetIdで引用RT)
-export async function postTweet(creds: XCredentials, text: string, mediaIds?: string[], quoteTweetId?: string): Promise<XPostResult> {
+// X の文字数カウント (weighted): CJK等は2、半角/絵文字近似は1〜2、URLは一律23
+// 上限は weighted 280 (=日本語140字相当)
+export function xWeightedLength(text: string): number {
+  // URLは t.co 短縮で一律23文字換算
+  const urlRe = /https?:\/\/[^\s]+/g
+  let weight = 0
+  const withoutUrls = text.replace(urlRe, () => {
+    weight += 23
+    return ''
+  })
+  for (const ch of withoutUrls) {
+    const cp = ch.codePointAt(0) || 0
+    // Twitter公式のweighted rangesの近似: ASCII/ラテン/一部記号=1、それ以外(CJK・かな・絵文字等)=2
+    if (
+      (cp >= 0x0000 && cp <= 0x10ff) ||
+      (cp >= 0x2000 && cp <= 0x200d) ||
+      (cp >= 0x2010 && cp <= 0x201f) ||
+      (cp >= 0x2032 && cp <= 0x2037)
+    ) {
+      weight += 1
+    } else {
+      weight += 2
+    }
+  }
+  return weight
+}
+
+export const X_WEIGHT_LIMIT = 280
+
+/**
+ * 長文をスレッド用に分割する。
+ * - 「1/」「2/」「1/n」等の番号付き行(Yutoのスレッド形式)があればそこで分割
+ * - なければ空行(段落)→ 文(。!?改行)の順で、weighted 280以内に詰める
+ */
+export function splitForThread(text: string): string[] {
+  const trimmed = text.trim()
+  if (xWeightedLength(trimmed) <= X_WEIGHT_LIMIT) return [trimmed]
+
+  // 番号付きスレッド形式: 行頭の「1/」「2/」「1/7」等で分割
+  const numbered = trimmed.split(/\n(?=\s*\d{1,2}\/(?:\d{1,2})?\s*)/).map((s) => s.trim()).filter(Boolean)
+  if (numbered.length >= 2 && numbered.every((s) => xWeightedLength(s) <= X_WEIGHT_LIMIT)) {
+    return numbered
+  }
+
+  // 段落 → 文 の順に詰める
+  const sentences: string[] = []
+  for (const para of trimmed.split(/\n{2,}/)) {
+    // 段落ごと入るならそのまま候補に
+    if (xWeightedLength(para) <= X_WEIGHT_LIMIT) {
+      sentences.push(para.trim())
+    } else {
+      // 文単位に分解 (。!?改行 の直後で切る)
+      for (const s of para.split(/(?<=[。!?！？\n])/)) {
+        if (s.trim()) sentences.push(s.trim())
+      }
+    }
+  }
+
+  const chunks: string[] = []
+  let current = ''
+  for (const s of sentences) {
+    const candidate = current ? `${current}\n${s}` : s
+    if (xWeightedLength(candidate) <= X_WEIGHT_LIMIT - 8) {
+      // -8 は後付けする「(n/m)」の余白
+      current = candidate
+    } else {
+      if (current) chunks.push(current)
+      // 1文単体でも超える場合は強制切断
+      if (xWeightedLength(s) > X_WEIGHT_LIMIT - 8) {
+        let buf = ''
+        for (const ch of s) {
+          if (xWeightedLength(buf + ch) > X_WEIGHT_LIMIT - 8) {
+            chunks.push(buf)
+            buf = ch
+          } else {
+            buf += ch
+          }
+        }
+        current = buf
+      } else {
+        current = s
+      }
+    }
+  }
+  if (current) chunks.push(current)
+  return chunks
+}
+
+// テキスト投稿 (画像付きは事前にuploadMediaでmedia_id取得 / quoteTweetIdで引用RT / replyToIdでスレッド連結)
+export async function postTweet(creds: XCredentials, text: string, mediaIds?: string[], quoteTweetId?: string, replyToId?: string): Promise<XPostResult> {
   const url = 'https://api.twitter.com/2/tweets'
   try {
     const auth = await buildOAuthHeader(creds, 'POST', url)
     const body: any = { text }
     if (mediaIds?.length) body.media = { media_ids: mediaIds }
     if (quoteTweetId) body.quote_tweet_id = quoteTweetId
+    if (replyToId) body.reply = { in_reply_to_tweet_id: replyToId }
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
@@ -94,6 +183,57 @@ export async function postTweet(creds: XCredentials, text: string, mediaIds?: st
     return { ok: true, tweetId, tweetUrl: tweetId ? `https://x.com/i/web/status/${tweetId}` : undefined }
   } catch (e: any) {
     return { ok: false, error: e?.message || 'ネットワークエラー' }
+  }
+}
+
+export interface XThreadResult {
+  ok: boolean
+  tweetIds: string[]      // 投稿できた全ツイートID(先頭が親)
+  tweetUrl?: string       // 先頭ツイートURL
+  posted: number          // 投稿成功数
+  total: number           // 分割総数
+  error?: string
+}
+
+// スレッド投稿: 長文を自動分割し、リプライ連結で連投する
+// - 画像は先頭ツイートのみに添付
+// - 途中失敗したらそこで中断し、投稿済み分のIDを返す(先頭が成功していればok=true)
+// - コスト: Post Create $0.015/件 × 分割数
+export async function postThread(
+  creds: XCredentials,
+  text: string,
+  mediaIds?: string[],
+): Promise<XThreadResult> {
+  const parts = splitForThread(text)
+  const total = parts.length
+  const tweetIds: string[] = []
+
+  for (let i = 0; i < parts.length; i++) {
+    // 2件以上に分割された場合、本文に番号がなければ「(n/m)」を付与
+    let body = parts[i]
+    if (total > 1 && !/^\s*\d{1,2}\//.test(body)) body = `${body}\n(${i + 1}/${total})`
+    const replyTo = tweetIds.length ? tweetIds[tweetIds.length - 1] : undefined
+    const r = await postTweet(creds, body, i === 0 ? mediaIds : undefined, undefined, replyTo)
+    if (!r.ok || !r.tweetId) {
+      return {
+        ok: tweetIds.length > 0,
+        tweetIds,
+        tweetUrl: tweetIds[0] ? `https://x.com/i/web/status/${tweetIds[0]}` : undefined,
+        posted: tweetIds.length,
+        total,
+        error: `${i + 1}本目で失敗: ${r.error}`,
+      }
+    }
+    tweetIds.push(r.tweetId)
+    if (i < parts.length - 1) await new Promise((res) => setTimeout(res, 1200)) // 連投のレート配慮
+  }
+
+  return {
+    ok: true,
+    tweetIds,
+    tweetUrl: `https://x.com/i/web/status/${tweetIds[0]}`,
+    posted: tweetIds.length,
+    total,
   }
 }
 
@@ -141,12 +281,19 @@ export async function fetchMyProfile(creds: XCredentials): Promise<{ ok: boolean
 
 // 自分の直近投稿のインプレッション/エンゲージメント合計
 // (GET /2/users/{id}/tweets — Owned Read $0.001/件の特別価格、20件で$0.02/日。同一リソースは24h重複排除)
+export interface TweetMetric {
+  tweetId: string
+  impressions: number
+  engagements: number
+}
+
 export async function fetchMyTweetsMetrics(
   creds: XCredentials,
   userId: string,
-): Promise<{ ok: boolean; impressions?: number; engagements?: number; tweetCount?: number; error?: string }> {
+): Promise<{ ok: boolean; impressions?: number; engagements?: number; tweetCount?: number; perTweet?: TweetMetric[]; error?: string }> {
   const url = `https://api.twitter.com/2/users/${userId}/tweets`
-  const params: Record<string, string> = { max_results: '20', 'tweet.fields': 'public_metrics' }
+  // max_results=50: 直近4日分(12本/日×4日弱)をカバー。Owned Read $0.001/件=約$0.05/回
+  const params: Record<string, string> = { max_results: '50', 'tweet.fields': 'public_metrics' }
   try {
     const auth = await buildOAuthHeader(creds, 'GET', url, params)
     const qs = Object.keys(params).sort().map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`).join('&')
@@ -158,12 +305,16 @@ export async function fetchMyTweetsMetrics(
     const tweets: any[] = Array.isArray(data.data) ? data.data : []
     let impressions = 0
     let engagements = 0
+    const perTweet: TweetMetric[] = []
     for (const t of tweets) {
       const m = t?.public_metrics || {}
-      impressions += m.impression_count || 0
-      engagements += (m.like_count || 0) + (m.retweet_count || 0) + (m.reply_count || 0) + (m.quote_count || 0)
+      const imp = m.impression_count || 0
+      const eng = (m.like_count || 0) + (m.retweet_count || 0) + (m.reply_count || 0) + (m.quote_count || 0)
+      impressions += imp
+      engagements += eng
+      if (t.id) perTweet.push({ tweetId: String(t.id), impressions: imp, engagements: eng })
     }
-    return { ok: true, impressions, engagements, tweetCount: tweets.length }
+    return { ok: true, impressions, engagements, tweetCount: tweets.length, perTweet }
   } catch (e: any) {
     return { ok: false, error: e?.message || 'ネットワークエラー' }
   }

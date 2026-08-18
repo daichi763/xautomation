@@ -4,7 +4,7 @@
 // - 枠6: quote_tweet_id があれば引用RT (投稿直前に生存確認、消えていれば通常投稿)
 // - X APIキー未設定時は何もしない (エラーにしない)
 
-import { getXCredentials, postTweet, uploadMedia, type XCredentials } from './x-api'
+import { getXCredentials, postTweet, postThread, uploadMedia, xWeightedLength, X_WEIGHT_LIMIT, type XCredentials } from './x-api'
 import { verifyTweetAlive } from './sources'
 
 export interface SoraPublishResult {
@@ -15,13 +15,13 @@ export interface SoraPublishResult {
   errors: string[]
 }
 
-// 1件をXへ投稿 (画像・引用RT対応) — 手動publish-xとcron両方から使う
+// 1件をXへ投稿 (画像・引用RT・長文スレッド対応) — 手動publish-xとcron両方から使う
 export async function publishPostToX(
   db: D1Database,
   r2: R2Bucket,
   creds: XCredentials,
   post: any,
-): Promise<{ ok: boolean; tweetId?: string; tweetUrl?: string; withImage: boolean; quoted: boolean; error?: string }> {
+): Promise<{ ok: boolean; tweetId?: string; tweetUrl?: string; withImage: boolean; quoted: boolean; threaded: boolean; threadCount?: number; error?: string }> {
   // 画像 (QA通過分のみ)
   let mediaIds: string[] = []
   const img: any = await db
@@ -49,13 +49,30 @@ export async function publishPostToX(
     // 消えていた場合は通常投稿として本文のみ投稿 (本文は引用なしでも成立する書き方をYutoに指示済み)
   }
 
+  // 長文(weighted 280超え)はスレッドとして自動分割投稿。引用RTはスレッド化しない(引用は1本で成立する前提)
+  const needsThread = !quoteId && xWeightedLength(post.body) > X_WEIGHT_LIMIT
+
+  if (needsThread) {
+    const th = await postThread(creds, post.body, mediaIds.length ? mediaIds : undefined)
+    if (!th.ok) return { ok: false, withImage: mediaIds.length > 0, quoted: false, threaded: true, error: th.error }
+
+    await db.prepare("UPDATE x_posts SET published_at = datetime('now'), buffer_id = ? WHERE post_id = ?")
+      .bind(th.tweetIds[0], post.post_id).run()
+
+    return {
+      ok: true, tweetId: th.tweetIds[0], tweetUrl: th.tweetUrl,
+      withImage: mediaIds.length > 0, quoted: false, threaded: true, threadCount: th.posted,
+      error: th.error, // 途中失敗の場合は部分成功として記録
+    }
+  }
+
   const result = await postTweet(creds, post.body, mediaIds.length ? mediaIds : undefined, quoteId)
-  if (!result.ok) return { ok: false, withImage: mediaIds.length > 0, quoted: !!quoteId, error: result.error }
+  if (!result.ok) return { ok: false, withImage: mediaIds.length > 0, quoted: !!quoteId, threaded: false, error: result.error }
 
   await db.prepare("UPDATE x_posts SET published_at = datetime('now'), buffer_id = ? WHERE post_id = ?")
     .bind(result.tweetId, post.post_id).run()
 
-  return { ok: true, tweetId: result.tweetId, tweetUrl: result.tweetUrl, withImage: mediaIds.length > 0, quoted: !!quoteId }
+  return { ok: true, tweetId: result.tweetId, tweetUrl: result.tweetUrl, withImage: mediaIds.length > 0, quoted: !!quoteId, threaded: false }
 }
 
 // 毎時実行: scheduled_at 到来分の承認済み投稿を投稿
@@ -86,11 +103,11 @@ export async function runSoraScheduledPublish(
       const r = await publishPostToX(db, r2, creds, post)
       if (r.ok) {
         result.published++
-        const tags = [r.withImage ? '画像付き' : '', r.quoted ? '引用RT' : ''].filter(Boolean).join('/')
+        const tags = [r.withImage ? '画像付き' : '', r.quoted ? '引用RT' : '', r.threaded ? `スレッド${r.threadCount}連` : ''].filter(Boolean).join('/')
         result.details.push(`枠${post.slot_number}: ${r.tweetUrl}${tags ? ` (${tags})` : ''}`)
         await db.prepare(
           "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('sora', 'auto_publish', 'success', ?, CURRENT_TIMESTAMP)",
-        ).bind(`枠${post.slot_number}を自動投稿: ${r.tweetUrl}${r.quoted ? ' (引用RT)' : ''}`).run()
+        ).bind(`枠${post.slot_number}を自動投稿: ${r.tweetUrl}${r.quoted ? ' (引用RT)' : ''}${r.threaded ? ` (スレッド${r.threadCount}連)` : ''}`).run()
       } else {
         result.errors.push(`枠${post.slot_number}: ${r.error}`)
         await db.prepare(

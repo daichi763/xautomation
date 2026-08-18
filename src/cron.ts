@@ -13,6 +13,7 @@ import { runNanaReport } from './nana'
 import { collectJaHotTweets, type JaHotTweet } from './sources'
 import { runSoraScheduledPublish, type SoraPublishResult } from './sora'
 import { collectKpiAuto } from './kpi-collector'
+import { embedAffiliateLinks, type AffiliateLink } from './affiliate'
 
 // 指示書§05 12枠タイムテーブル
 export const SLOT_TABLE: { slot: number; time: string; type: string; limit: string }[] = [
@@ -196,6 +197,13 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
 
   const createdPosts: { postId: string; slot: number; body: string; topicTitle: string }[] = []
 
+  // 枠8用: 登録済みアフィリンク(activeのみ)。0件なら埋め込みはスキップしてそのまま投稿(未登録でも正常動作)
+  let affiliateLinks: AffiliateLink[] = []
+  try {
+    const al = await db.prepare("SELECT * FROM affiliate_links WHERE status = 'active' AND auto_embed = 1").all()
+    affiliateLinks = (al.results || []) as any[]
+  } catch { /* テーブルなしでも続行 */ }
+
   // 枠11用: 最新の公開済みnote(実URLあり)を取得 — 実際の記事への導線を作る
   let latestNote: any = null
   try {
@@ -303,6 +311,18 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
     if (qa.status === 'ok') result.mio.ok++
     else if (qa.status === 'needs_fix') result.mio.needsFix++
     else result.mio.ng++
+
+    // 枠8(ツール比較・アフィ枠): 登録済みアフィリンクをQA後の本文に自動埋め込み
+    // リンク0件・ツール名不一致なら何も変えずそのまま(未登録でも正常動作)
+    if (slotDef.slot === 8 && affiliateLinks.length > 0) {
+      try {
+        const emb = embedAffiliateLinks(body, affiliateLinks)
+        if (emb.changed) {
+          body = emb.embedded
+          await logWorker(db, 'sora', 'affiliate_embed', true, { slot: 8, tools: emb.detected.map((d) => d.tool_name), pr_added: emb.pr_added })
+        }
+      } catch { /* 埋め込み失敗でも投稿は継続 */ }
+    }
 
     const postId = `p-auto-${Date.now()}-${slotDef.slot}`
     try {

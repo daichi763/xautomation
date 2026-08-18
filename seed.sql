@@ -52,8 +52,8 @@ INSERT OR IGNORE INTO x_posts (post_id, topic_id, slot_number, scheduled_at, bod
 
 -- アフィリエイトリンク(取締役がASP提携後に1回登録 → 以後自動埋め込み)
 INSERT OR REPLACE INTO affiliate_links (link_id, tool_name, aliases, affiliate_url, program, note, status, auto_embed) VALUES
-  ('af-001', 'ElevenLabs', '["ElevenLabs","イレブンラボ","elevenlabs"]', 'https://elevenlabs.io/?from=partnerexample', '公式アフィリエイト(要提携申請)', '報酬: 初年度22%(例)。URLは提携承認後に差し替えてください', 'active', 1),
-  ('af-002', 'CapCut', '["CapCut","キャップカット","capcut"]', 'https://www.capcut.com/?ref=example', '公式パートナー(要申請)', 'URLは提携承認後に差し替えてください', 'active', 1),
+  ('af-001', 'ElevenLabs', '["ElevenLabs","イレブンラボ","elevenlabs"]', 'https://elevenlabs.io/?from=partnerexample', '公式アフィリエイト(要提携申請)', '報酬: 初年度22%(例)。ダミーURLのためpaused。提携承認後に実URLへ差し替えてactive化', 'paused', 1),
+  ('af-002', 'CapCut', '["CapCut","キャップカット","capcut"]', 'https://www.capcut.com/?ref=example', '公式パートナー(要申請)', 'ダミーURLのためpaused。提携承認後に実URLへ差し替えてactive化', 'paused', 1),
   ('af-003', 'ConoHa WING', '["ConoHa","コノハウィング"]', 'https://px.a8.net/svt/ejp?a8mat=EXAMPLE', 'A8.net(要提携申請)', 'ブログ開設ネタ用。URLは提携承認後に差し替え', 'paused', 1);
 
 -- 用語注釈辞書(Yuto/QAが素人向け注釈に使用)

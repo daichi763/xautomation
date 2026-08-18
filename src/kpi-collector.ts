@@ -162,6 +162,20 @@ export async function collectKpiAuto(db: D1Database, env: Record<string, string 
           result.xImpressions = metrics.impressions
           result.xEngagements = metrics.engagements
           result.sources.push(`Xインプレ(直近${metrics.tweetCount}投稿)`)
+
+          // 投稿別メトリクスをx_postsへ書き戻し(buffer_id=tweet_idで突合)
+          // → Ruiの枠別分析・売上TOP共通点分析が実データで回るようになる
+          let written = 0
+          for (const t of metrics.perTweet || []) {
+            try {
+              const r = await db
+                .prepare('UPDATE x_posts SET impressions = ?, engagements = ? WHERE buffer_id = ?')
+                .bind(t.impressions, t.engagements, t.tweetId)
+                .run()
+              if (r.meta?.changes) written++
+            } catch { /* 個別失敗は無視して続行 */ }
+          }
+          if (written > 0) result.sources.push(`投稿別実績${written}本を更新`)
         } else {
           result.errors.push(`Xインプレ取得失敗: ${metrics.error}`)
         }
