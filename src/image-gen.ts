@@ -1,7 +1,7 @@
 // Aki: 画像生成 (gpt-image-2) + Mio: 画像QA (gpt-5 vision)
 // 指示書07章: ブランドガイド ネイビー#1E3A5F × オレンジ#FF7A45
 
-export type ImagePurpose = 'thumbnail' | 'infographic' | 'note_cover'
+export type ImagePurpose = 'thumbnail' | 'infographic' | 'note_cover' | 'note_diagram'
 
 // 指示書07章の型別プロンプト (テキスト入り画像はgpt-image-2必須)
 export function buildImagePrompt(purpose: ImagePurpose, titleText: string, extra?: string): string {
@@ -13,6 +13,8 @@ export function buildImagePrompt(purpose: ImagePurpose, titleText: string, extra
       return `clean infographic in Japanese, ${brand}, step diagram with numbered boxes, title "${titleText}", minimalist icons, no photo elements${extra ? ', ' + extra : ''}`
     case 'note_cover':
       return `modern note article cover image, ${brand}, Japanese text "${titleText}" in bold, navy gradient background, orange geometric accent shapes${extra ? ', ' + extra : ''}`
+    case 'note_diagram':
+      return `clean explanatory diagram for a Japanese paid article body, ${brand}, white or very light background variant with navy and orange accents for readability inside article text, title "${titleText}", flowchart or comparison table style, minimalist flat design, no photo elements${extra ? ', ' + extra : ''}`
   }
 }
 
@@ -20,6 +22,7 @@ export const IMAGE_SIZE: Record<ImagePurpose, string> = {
   thumbnail: '1536x1024', // X用 3:2 (gpt-image-2 対応サイズ)
   infographic: '1024x1536',
   note_cover: '1536x1024',
+  note_diagram: '1536x1024', // note本文内に横長で挿入
 }
 
 // gpt-image-2 の概算コスト (品質mediumベース)

@@ -193,9 +193,19 @@ app.get('/api/notes', async (c) => {
 
 app.get('/api/notes/:id', async (c) => {
   const { DB } = c.env
-  const row = await DB.prepare('SELECT * FROM note_articles WHERE article_id = ?').bind(c.req.param('id')).first()
+  const id = c.req.param('id')
+  const row: any = await DB.prepare('SELECT * FROM note_articles WHERE article_id = ?').bind(id).first()
   if (!row) return c.notFound()
-  return c.json({ article: row })
+  // 記事に紐づく画像 (カバー + 本文用図解)
+  let images: any[] = []
+  try {
+    const imgRows = await DB.prepare(
+      `SELECT image_id, purpose, title_text, qa_status, created_at FROM generated_images
+       WHERE article_id = ? OR image_id = ? ORDER BY created_at ASC`,
+    ).bind(id, row.cover_image_id || '').all()
+    images = (imgRows.results || []) as any[]
+  } catch { /* article_id列が未追加の環境でも記事表示は継続 */ }
+  return c.json({ article: row, images })
 })
 
 app.post('/api/notes/:id/publish', async (c) => {
@@ -752,7 +762,7 @@ app.post('/api/riko/crawl', async (c) => {
 app.get('/api/cron/status', async (c) => {
   const { DB } = c.env
   const logs = await DB.prepare(
-    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'auto_note', 'daily_analysis', 'weekly_analysis', 'monthly_analysis', 'daily_report', 'quote_crawl', 'auto_publish', 'kpi_collect', 'competitor_research', 'monthly_note', 'note_cover') ORDER BY id DESC LIMIT 22"
+    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'image_plan', 'note_diagrams', 'auto_note', 'daily_analysis', 'weekly_analysis', 'monthly_analysis', 'daily_report', 'quote_crawl', 'auto_publish', 'kpi_collect', 'competitor_research', 'monthly_note', 'note_cover') ORDER BY id DESC LIMIT 22"
   ).all()
   return c.json({
     secretConfigured: !!c.env.CRON_SECRET,

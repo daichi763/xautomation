@@ -7,7 +7,7 @@ import { callOpenAI, YUTO_SYSTEM } from './llm'
 import { runQaCheck } from './qa-rules'
 import { runAlexWeeklyPlan, getCurrentWeekPlan } from './alex'
 import { runNoteWriter, runMonthlySummaryNote } from './note-writer'
-import { runAkiInfographic, runAkiNoteCover } from './aki'
+import { runAkiImagePlan, runAkiNoteCover, runAkiNoteDiagrams } from './aki'
 import { runRuiDaily, runRuiWeekly, runRuiMonthly } from './rui'
 import { runNanaReport } from './nana'
 import { collectJaHotTweets, type JaHotTweet } from './sources'
@@ -69,7 +69,8 @@ export interface PipelineResult {
   competitor: { ran: boolean; collected: number; costUsd: number; error?: string }
   kai: { translated: number; costUsd: number; errors: string[] }
   yuto: { postsCreated: number; costUsd: number; errors: string[] }
-  aki: { generated: boolean; qaStatus?: string; costUsd: number; error?: string }
+  aki: { planned: number; generated: number; attached: number; qaFailed: number; costUsd: number; error?: string }
+  noteDiagrams: { generated: number; costUsd: number; error?: string }
   note: { created: boolean; type?: string; title?: string; costUsd: number; error?: string }
   noteCover: { generated: boolean; costUsd: number; error?: string }
   monthlyNote: { created: boolean; title?: string; costUsd: number; error?: string }
@@ -96,7 +97,8 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
     competitor: { ran: false, collected: 0, costUsd: 0 },
     kai: { translated: 0, costUsd: 0, errors: [] },
     yuto: { postsCreated: 0, costUsd: 0, errors: [] },
-    aki: { generated: false, costUsd: 0 },
+    aki: { planned: 0, generated: 0, attached: 0, qaFailed: 0, costUsd: 0 },
+    noteDiagrams: { generated: 0, costUsd: 0 },
     note: { created: false, costUsd: 0 },
     noteCover: { generated: false, costUsd: 0 },
     monthlyNote: { created: false, costUsd: 0 },
@@ -192,7 +194,7 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
     }
   } catch { /* 計画なしでも続行 */ }
 
-  let slot3Created: { postId: string; body: string; topicTitle: string } | null = null
+  const createdPosts: { postId: string; slot: number; body: string; topicTitle: string }[] = []
 
   // 枠11用: 最新の公開済みnote(実URLあり)を取得 — 実際の記事への導線を作る
   let latestNote: any = null
@@ -323,7 +325,7 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
         )
         .run()
       result.yuto.postsCreated++
-      if (slotDef.slot === 3) slot3Created = { postId, body, topicTitle: topic.title_ja }
+      createdPosts.push({ postId, slot: slotDef.slot, body, topicTitle: isQuoteSlot ? '引用RT' : topic.title_ja })
     } catch (e: any) {
       result.yuto.errors.push(`枠${slotDef.slot}保存失敗: ${e.message}`)
     }
@@ -337,12 +339,12 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
   await logWorker(db, 'yuto', 'auto_write', result.yuto.postsCreated > 0, { postsCreated: result.yuto.postsCreated, costUsd: result.yuto.costUsd, errors: result.yuto.errors.slice(0, 3) })
   await logWorker(db, 'mio', 'auto_qa', true, result.mio)
 
-  // ========== Phase 5: Aki 枠3図解生成 → Mio画像QA → 投稿に添付 ==========
-  if (slot3Created) {
+  // ========== Phase 5: Aki 画像計画(全12枠を判定→必要な枠に生成・最大8枚) → Mio画像QA → 合格分のみ添付 ==========
+  if (createdPosts.length > 0) {
     try {
-      const aki = await runAkiInfographic(db, r2, apiKey, slot3Created.postId, slot3Created.body, slot3Created.topicTitle)
-      result.aki = { generated: aki.ok, qaStatus: aki.qaStatus, costUsd: aki.costUsd, error: aki.error }
-      await logWorker(db, 'aki', 'auto_infographic', aki.ok, { imageId: aki.imageId, title: aki.title, qaStatus: aki.qaStatus, costUsd: aki.costUsd, error: aki.error })
+      const aki = await runAkiImagePlan(db, r2, apiKey, createdPosts, 8)
+      result.aki = { planned: aki.planned, generated: aki.generated, attached: aki.attached, qaFailed: aki.qaFailed, costUsd: aki.costUsd, error: aki.error }
+      await logWorker(db, 'aki', 'image_plan', aki.ok, { planned: aki.planned, generated: aki.generated, attached: aki.attached, qaFailed: aki.qaFailed, details: aki.details.slice(0, 10), costUsd: aki.costUsd, error: aki.error })
     } catch (e: any) {
       result.aki.error = e?.message
     }
@@ -398,6 +400,20 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
     }
   }
 
+  // ========== Phase 6.8: Aki 有料note本文用の図解(最大2枚) → Mio QA → ゲート③でDL ==========
+  if (createdArticleId && ['paid_single', 'membership', 'monthly_summary'].includes(createdArticleType)) {
+    try {
+      const art: any = await db.prepare('SELECT body_md FROM note_articles WHERE article_id = ?').bind(createdArticleId).first()
+      if (art?.body_md) {
+        const diag = await runAkiNoteDiagrams(db, r2, apiKey, createdArticleId, createdArticleTitle, art.body_md)
+        result.noteDiagrams = { generated: diag.generated, costUsd: diag.costUsd, error: diag.error }
+        await logWorker(db, 'aki', 'note_diagrams', diag.ok, { articleId: createdArticleId, generated: diag.generated, imageIds: diag.imageIds, costUsd: diag.costUsd, error: diag.error })
+      }
+    } catch (e: any) {
+      result.noteDiagrams.error = e?.message
+    }
+  }
+
   // ========== Phase 7: Rui 分析(毎日日次、日曜は週次も) ==========
   try {
     const ruiD = await runRuiDaily(db, apiKey)
@@ -438,7 +454,7 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
 
   result.totalCostUsd =
     result.alex.costUsd + result.riko.costUsd + result.competitor.costUsd + result.kai.costUsd + result.yuto.costUsd +
-    result.aki.costUsd + result.note.costUsd + result.noteCover.costUsd + result.monthlyNote.costUsd +
+    result.aki.costUsd + result.noteDiagrams.costUsd + result.note.costUsd + result.noteCover.costUsd + result.monthlyNote.costUsd +
     result.rui.costUsd + result.nana.costUsd
   result.ok = result.yuto.postsCreated > 0
   if (!result.ok) result.error = 'Yuto執筆が全件失敗しました'

@@ -548,6 +548,25 @@ function bindDecisionButtons() {
 async function openNotePreview(id) {
   const { data } = await axios.get(`/api/notes/${id}`);
   const a = data.article;
+  const images = data.images || [];
+  const purposeJa = { note_cover: 'カバー画像', note_diagram: '本文用図解', infographic: '図解', thumbnail: 'サムネイル' };
+  const qaChip = (s) => s === 'ok' ? '<span class="text-[10px] bg-emerald-100 text-emerald-700 font-bold px-1.5 py-0.5 rounded">QA合格</span>' : s === 'ng' ? '<span class="text-[10px] bg-red-100 text-red-600 font-bold px-1.5 py-0.5 rounded">QA不合格</span>' : '<span class="text-[10px] bg-amber-100 text-amber-700 font-bold px-1.5 py-0.5 rounded">要修正</span>';
+  const imagesHtml = images.length ? `
+    <div class="mb-4">
+      <div class="text-xs font-bold text-brand-navy mb-2"><i class="fas fa-images mr-1"></i>Aki生成画像(${images.length}枚) — クリックで拡大 / ⬇でダウンロードしてnoteに挿入</div>
+      <div class="grid grid-cols-2 gap-2">
+        ${images.map((im) => `
+          <div class="border border-slate-200 rounded-lg overflow-hidden">
+            <img src="/api/images/${esc(im.image_id)}/file" alt="${esc(im.title_text || '')}" class="w-full aspect-video object-cover cursor-pointer bg-slate-100" loading="lazy" onclick="window.open('/api/images/${esc(im.image_id)}/file', '_blank')">
+            <div class="flex items-center justify-between px-2 py-1.5 bg-slate-50">
+              <span class="text-[10px] text-slate-500 truncate">${esc(purposeJa[im.purpose] || im.purpose)}: ${esc(im.title_text || '')}</span>
+              <span class="flex items-center gap-1 shrink-0">${qaChip(im.qa_status)}
+                <a href="/api/images/${esc(im.image_id)}/file" download="${esc(im.image_id)}.png" class="text-brand-navy hover:text-brand-orange" title="ダウンロード"><i class="fas fa-download text-xs"></i></a>
+              </span>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>` : '';
   const typeJa = { free: '無料記事', paid_single: `有料記事 ¥${a.price_yen}`, monthly_summary: `月次まとめ ¥${a.price_yen}`, membership: 'メンバーシップ' };
   // paywall位置で分割して可視化(有料記事のみ)
   const marker = '<!--paywall-->';
@@ -580,6 +599,7 @@ async function openNotePreview(id) {
       </div>
       <div class="p-5">
         <div class="text-xs text-slate-400 mb-3">種別: ${typeJa[a.type] || esc(a.type)}${hasPaywall ? ' / 下のオレンジの線がnoteの有料化ラインになります' : ''} / 文字数: 約${a.body_md.replace(marker, '').length}字</div>
+        ${imagesHtml}
         ${bodyHtml}
       </div>
     </div>

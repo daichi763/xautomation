@@ -207,16 +207,64 @@ export async function runRuiMonthly(db: D1Database, apiKey: string): Promise<Rui
     }
 
     const facts = await collectKpiFacts(db, 30)
+
+    // 価格帯別の集計 (価格別CVRの材料): view→購入の転換率を価格ごとに算出
+    let priceTierText = '(有料note実績なし)'
+    try {
+      const tierRows = await db
+        .prepare(
+          `SELECT price_yen, COUNT(*) AS articles, SUM(view_count) AS views, SUM(sales_count) AS sales, SUM(revenue_yen) AS revenue
+           FROM note_articles WHERE published_at IS NOT NULL AND price_yen > 0
+           GROUP BY price_yen ORDER BY price_yen ASC`,
+        )
+        .all()
+      const tiers = (tierRows.results || []) as any[]
+      if (tiers.length) {
+        priceTierText = tiers
+          .map((t) => {
+            const cvr = t.views > 0 ? ((t.sales / t.views) * 100).toFixed(2) : '算出不可(view 0)'
+            return `¥${t.price_yen}: 記事${t.articles}本 / view合計${t.views} / 販売${t.sales}件 / 収益${t.revenue}円 / CVR ${cvr}${t.views > 0 ? '%' : ''}`
+          })
+          .join('\n')
+      }
+    } catch { /* 集計失敗時はプロンプト内で言及なし */ }
+
+    // 売上TOP記事 (共通点分析の材料)
+    let topSalesText = '(売上データなし)'
+    try {
+      const topRows = await db
+        .prepare(
+          `SELECT title, type, price_yen, view_count, sales_count, revenue_yen, date(published_at) AS pub_date
+           FROM note_articles WHERE published_at IS NOT NULL AND revenue_yen > 0
+           ORDER BY revenue_yen DESC LIMIT 5`,
+        )
+        .all()
+      const tops = (topRows.results || []) as any[]
+      if (tops.length) {
+        topSalesText = tops
+          .map((n, i) => `${i + 1}位 [${n.type}|¥${n.price_yen}|${n.pub_date}] ${n.title}: view${n.view_count} / ${n.sales_count}件 / ${n.revenue_yen}円`)
+          .join('\n')
+      }
+    } catch { /* 無視 */ }
+
     const userPrompt = `以下の30日分のデータをもとに【月次振り返り+来月戦略】を作成してください。取締役(Mさん)向けの報告書です。
 
 ${facts}
+
+## 売上TOP記事(収益順)
+${topSalesText}
+
+## 価格帯別実績(CVR = 販売件数 ÷ view数)
+${priceTierText}
 
 ## 出力形式(Markdown)
 # 月次レポート
 ## 1. 今月の総括(数字ベース: フォロワー/インプ/note売上/収益)
 ## 2. うまくいったこと(仮説付き)
 ## 3. うまくいかなかったこと(仮説付き)
-## 4. 来月の戦略(優先度順に3〜5項目、それぞれ具体アクションと期待効果)
+## 4. 売上TOP記事の共通点(タイトルの型・テーマ・価格・公開曜日・X導線の観点で分析。売上ゼロの場合はviewの多い記事の共通点を代わりに分析)
+## 5. 価格別CVR(価格帯ごとの転換率を比較し、最適価格の仮説と価格戦略の提案を出す。データ不足時はその旨を明記し検証プランを提示)
+## 6. 来月の戦略(優先度順に3〜5項目、それぞれ具体アクションと期待効果)
 
 データが少ない/デモ値の場合はその旨を明記した上で、立ち上げ期として妥当な戦略を提示してください。`
 
