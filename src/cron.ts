@@ -14,6 +14,9 @@ import { collectJaHotTweets, type JaHotTweet } from './sources'
 import { runSoraScheduledPublish, type SoraPublishResult } from './sora'
 import { collectKpiAuto } from './kpi-collector'
 import { embedAffiliateLinks, type AffiliateLink } from './affiliate'
+import { collectMentionsAndDraft, publishApprovedReplies, type ReplyCollectResult, type ReplyPublishResult } from './replies'
+import { runSlotOptimize, loadSlotOverrides } from './slot-optimizer'
+import { runPostRecycle } from './recycle'
 
 // 指示書§05 12枠タイムテーブル
 export const SLOT_TABLE: { slot: number; time: string; type: string; limit: string }[] = [
@@ -47,11 +50,11 @@ const SLOT_HINTS: Record<number, string> = {
   12: '1日の締めの一言。生活感や本音をこぼす',
 }
 
-function nextScheduledAt(time: string): string {
+function nextScheduledAt(time: string, offsetMinutes = 0): string {
   const [h, m] = time.split(':').map(Number)
   const now = new Date()
   const jstNow = new Date(now.getTime() + 9 * 3600 * 1000)
-  const target = new Date(Date.UTC(jstNow.getUTCFullYear(), jstNow.getUTCMonth(), jstNow.getUTCDate() + 1, h - 9, m))
+  const target = new Date(Date.UTC(jstNow.getUTCFullYear(), jstNow.getUTCMonth(), jstNow.getUTCDate() + 1, h - 9, m + offsetMinutes))
   return target.toISOString().replace('T', ' ').slice(0, 19)
 }
 
@@ -79,6 +82,8 @@ export interface PipelineResult {
   rui: { daily: boolean; weekly: boolean; monthly: boolean; costUsd: number; errors: string[] }
   nana: { reported: boolean; costUsd: number; error?: string }
   mio: { checked: number; ok: number; needsFix: number; ng: number }
+  slotOptimize: { ran: boolean; analyzed: number; changes: string[]; error?: string }
+  recycle: { created: boolean; sourcePostId?: string; costUsd: number; error?: string }
   totalCostUsd: number
   error?: string
 }
@@ -107,6 +112,8 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
     rui: { daily: false, weekly: false, monthly: false, costUsd: 0, errors: [] },
     nana: { reported: false, costUsd: 0 },
     mio: { checked: 0, ok: 0, needsFix: 0, ng: 0 },
+    slotOptimize: { ran: false, analyzed: 0, changes: [] },
+    recycle: { created: false, costUsd: 0 },
     totalCostUsd: 0,
   }
 
@@ -196,6 +203,21 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
   } catch { /* 計画なしでも続行 */ }
 
   const createdPosts: { postId: string; slot: number; body: string; topicTitle: string }[] = []
+
+  // P1-5: 週次(月曜)に枠別ベスト時間帯を再計算 → 以降のスケジュールに反映
+  if (jstDay() === 1) {
+    try {
+      const opt = await runSlotOptimize(db, SLOT_TABLE.map((s) => ({ slot: s.slot, time: s.time })))
+      result.slotOptimize = { ran: true, analyzed: opt.analyzed, changes: opt.changes, error: opt.error }
+      await logWorker(db, 'rui', 'slot_optimize', opt.ok, { analyzed: opt.analyzed, overrides: opt.overrides, changes: opt.changes, error: opt.error })
+    } catch (e: any) {
+      result.slotOptimize.error = e?.message
+    }
+  }
+  // 保存済みオーバーライドを読み込み (なければデフォルト時刻)
+  let slotOverrides: Record<number, string> = {}
+  try { slotOverrides = await loadSlotOverrides(db) } catch { /* デフォルト続行 */ }
+  const slotTime = (slot: number, defTime: string) => slotOverrides[slot] || defTime
 
   // 枠8用: 登録済みアフィリンク(activeのみ)。0件なら埋め込みはスキップしてそのまま投稿(未登録でも正常動作)
   let affiliateLinks: AffiliateLink[] = []
@@ -335,7 +357,7 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
           postId,
           isQuoteSlot ? null : topic.topic_id,
           slotDef.slot,
-          nextScheduledAt(slotDef.time),
+          nextScheduledAt(slotTime(slotDef.slot, slotDef.time)),
           body,
           qa.status,
           JSON.stringify(qa.issues),
@@ -368,6 +390,20 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
     } catch (e: any) {
       result.aki.error = e?.message
     }
+  }
+
+  // ========== Phase 5.5: 高実績投稿リサイクル(P1-6: 14日経過インプ上位を新しい切り口でリライト→ゲート②) ==========
+  try {
+    const defTimes: Record<number, string> = {}
+    for (const s of SLOT_TABLE) defTimes[s.slot] = s.time
+    // 通常枠と同時刻を避けるため+30分ずらして予約
+    const rec = await runPostRecycle(db, apiKey, (slot) => nextScheduledAt(slotTime(slot, defTimes[slot] || '20:00'), 30))
+    result.recycle = { created: rec.created, sourcePostId: rec.sourcePostId, costUsd: rec.costUsd, error: rec.error }
+    if (rec.created || (rec.error && !rec.error.startsWith('スキップ'))) {
+      await logWorker(db, 'yuto', 'post_recycle', rec.ok && rec.created, { sourcePostId: rec.sourcePostId, sourceImpressions: rec.sourceImpressions, postId: rec.postId, costUsd: rec.costUsd, error: rec.error })
+    }
+  } catch (e: any) {
+    result.recycle.error = e?.message
   }
 
   // ========== Phase 6: Yuto note記事執筆(毎日1本: 日曜=有料¥100・土曜=メンバー限定・他=無料 → ゲート③) ==========
@@ -475,7 +511,7 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
   result.totalCostUsd =
     result.alex.costUsd + result.riko.costUsd + result.competitor.costUsd + result.kai.costUsd + result.yuto.costUsd +
     result.aki.costUsd + result.noteDiagrams.costUsd + result.note.costUsd + result.noteCover.costUsd + result.monthlyNote.costUsd +
-    result.rui.costUsd + result.nana.costUsd
+    result.rui.costUsd + result.nana.costUsd + result.recycle.costUsd
   result.ok = result.yuto.postsCreated > 0
   if (!result.ok) result.error = 'Yuto執筆が全件失敗しました'
   return result
@@ -491,6 +527,7 @@ export interface HourlyTickResult {
   mode: 'pipeline' | 'publish_only'
   pipeline?: PipelineResult
   sora: SoraPublishResult
+  replies: { collect: ReplyCollectResult; publish: ReplyPublishResult }
   error?: string
 }
 
@@ -505,6 +542,10 @@ export async function runHourlyTick(
     ok: true,
     mode: 'publish_only',
     sora: { ok: true, published: 0, skippedNoCreds: false, details: [], errors: [] },
+    replies: {
+      collect: { ok: true, fetched: 0, drafted: 0, skippedNoCreds: false, costUsd: 0, errors: [] },
+      publish: { ok: true, published: 0, skippedNoCreds: false, details: [], errors: [] },
+    },
   }
 
   // JST 5時台のみパイプライン(同日重複実行ガード: 今日分のauto_write成功ログがあればスキップ)
@@ -529,6 +570,26 @@ export async function runHourlyTick(
     result.sora = await runSoraScheduledPublish(db, r2, env)
   } catch (e: any) {
     result.sora.errors.push(e?.message || 'Sora実行エラー')
+  }
+
+  // P1-4: リプライ自動返信 — JST 8/12/18/22時にメンション回収→下書き生成(1日4回でRead課金を抑制)、
+  //        承認済み返信の送信は毎時(Xキー未設定なら何もしない)
+  try {
+    if ([8, 12, 18, 22].includes(jstHour)) {
+      result.replies.collect = await collectMentionsAndDraft(db, String(env.OPENAI_API_KEY || ''), env)
+      if (!result.replies.collect.skippedNoCreds && (result.replies.collect.fetched > 0 || result.replies.collect.errors.length > 0)) {
+        await db.prepare(
+          "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('sora', 'mention_collect', ?, ?, CURRENT_TIMESTAMP)",
+        ).bind(result.replies.collect.ok ? 'success' : 'failed', JSON.stringify({ fetched: result.replies.collect.fetched, drafted: result.replies.collect.drafted, costUsd: result.replies.collect.costUsd, errors: result.replies.collect.errors.slice(0, 3) })).run()
+      }
+    }
+  } catch (e: any) {
+    result.replies.collect.errors.push(e?.message || 'メンション収集エラー')
+  }
+  try {
+    result.replies.publish = await publishApprovedReplies(db, env)
+  } catch (e: any) {
+    result.replies.publish.errors.push(e?.message || '返信送信エラー')
   }
 
   return result

@@ -228,6 +228,8 @@ async function renderApprove() {
     axios.get('/api/notes'),
     axios.get('/api/posts?status=approved')
   ]);
+  let replies = [];
+  try { replies = (await axios.get('/api/replies?status=pending')).data.replies || []; } catch (e) {}
   try { xStatus = (await axios.get('/api/x/status')).data; } catch (e) {}
   try { cronStatus = (await axios.get('/api/cron/status')).data; } catch (e) {}
   const posts = postsRes.data.posts;
@@ -245,6 +247,15 @@ async function renderApprove() {
       ${posts.length ? `<div class="grid md:grid-cols-2 gap-3">${posts.map(postCard).join('')}</div>`
         : `<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">承認待ちの投稿はありません 🎉<br>
            <button id="pipeline-run-btn" class="mt-3 bg-brand-orange text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-robot mr-1"></i>パイプラインを今すぐ実行(Riko→Kai→Yuto→Mio)</button></p>`}
+    </section>
+
+    <section id="gate-replies">
+      <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+        <h2 class="font-bold text-lg text-brand-navy"><i class="fas fa-reply mr-2"></i>リプライ返信の承認(${replies.length}件)</h2>
+        ${replies.length ? `<button id="approve-all-replies-btn" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-check-double mr-1"></i>QA通過分を一括承認</button>` : ''}
+      </div>
+      ${replies.length ? `<div class="grid md:grid-cols-2 gap-3">${replies.map(replyCard).join('')}</div>`
+        : `<p class="bg-white rounded-xl p-6 text-center text-slate-400 text-sm">承認待ちの返信はありません${xStatus.connected ? '' : '(X API接続後、メンションを自動回収して返信案をここに並べます)'}</p>`}
     </section>
 
     <section id="gate-weekly">
@@ -298,7 +309,7 @@ async function renderApprove() {
             <span class="w-2 h-2 rounded-full ${cronStatus?.secretConfigured ? 'bg-emerald-500' : 'bg-amber-500'}"></span>
             定時実行 ${cronStatus?.secretConfigured ? '設定済み' : '未設定(手動ボタンは利用可)'}
           </span>
-          <span class="text-xs text-slate-500">🌅 毎朝1回: NanaのKPI自動収集 → [月]Riko競合リサーチ+Alex週次計画 → Riko巡回 → Kai翻訳 → Yuto12枠執筆+Aki図解 → note執筆(日=有料¥100/土=メンバー限定/毎月1日=月次まとめ¥500)+Akiカバー画像 → Rui分析 → Nanaレポート / ⏰毎時: Sora自動投稿</span>
+          <span class="text-xs text-slate-500">🌅 毎朝1回: NanaのKPI自動収集 → [月]Riko競合リサーチ+Alex週次計画 → Riko巡回 → Kai翻訳 → Yuto12枠執筆+Aki図解 → note執筆(日=有料¥100/土=メンバー限定/毎月1日=月次まとめ¥500)+Akiカバー画像 → Rui分析 → Nanaレポート / ⏰毎時: Sora自動投稿+承認済みリプライ送信 / 🔁8・12・18・22時: メンション回収→返信案生成 / 📊毎週月曜: 投稿時間最適化 / ♻️毎日: 高実績投稿リサイクル</span>
         </div>
         ${cronStatus?.recentRuns?.length ? `
         <div class="overflow-x-auto"><table class="w-full text-xs">
@@ -306,7 +317,7 @@ async function renderApprove() {
           <tbody>${cronStatus.recentRuns.map((r) => {
             let d = {}; try { d = JSON.parse(r.output_json || '{}'); } catch (e) {}
             const WORKER_JA = { alex: 'Alex', riko: 'Riko', kai: 'Kai', yuto: 'Yuto', aki: 'Aki', sora: 'Sora', rui: 'Rui', nana: 'Nana', mio: 'Mio' };
-            const ACTION_JA = { weekly_plan: '週次計画', auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: 'X執筆', auto_note: 'note執筆', auto_qa: 'QA審査', auto_infographic: '図解生成', daily_analysis: '日次分析', weekly_analysis: '週次分析', monthly_analysis: '月次分析', daily_report: '日次レポート', quote_crawl: '話題ツイート収集', auto_publish: '自動投稿', x_publish: 'X投稿(手動)', kpi_collect: 'KPI自動収集', competitor_research: '競合リサーチ', monthly_note: '月次まとめnote', note_cover: 'noteカバー画像' };
+            const ACTION_JA = { weekly_plan: '週次計画', auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: 'X執筆', auto_note: 'note執筆', auto_qa: 'QA審査', auto_infographic: '図解生成', daily_analysis: '日次分析', weekly_analysis: '週次分析', monthly_analysis: '月次分析', daily_report: '日次レポート', quote_crawl: '話題ツイート収集', auto_publish: '自動投稿', x_publish: 'X投稿(手動)', kpi_collect: 'KPI自動収集', competitor_research: '競合リサーチ', monthly_note: '月次まとめnote', note_cover: 'noteカバー画像', mention_collect: 'メンション回収', reply_publish: 'リプライ返信', slot_optimize: '投稿時間最適化', post_recycle: '投稿リサイクル' };
             let detail = '';
             if (r.worker_name === 'riko') detail = `収集${d.collected ?? '-'}件 → ネタ${d.inserted ?? '-'}件投入${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.worker_name === 'kai') detail = `翻訳${d.translated ?? '-'}本${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
@@ -318,6 +329,9 @@ async function renderApprove() {
             else if (r.worker_name === 'nana') detail = `承認待ち${d.pending ?? '-'}件 / 滞留${d.stale ?? 0}件${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.action === 'auto_note') detail = `note「${d.title ? esc(d.title).slice(0, 25) : '-'}」(${d.type === 'paid_single' ? '有料¥100' : d.type === 'membership' ? 'メンバー限定' : '無料'}) QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.action === 'monthly_note') detail = `月次まとめ「${d.title ? esc(d.title).slice(0, 25) : '-'}」(¥500) QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.action === 'mention_collect') detail = `メンション${d.fetched ?? 0}件 → 返信案${d.drafted ?? 0}件生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.action === 'slot_optimize') detail = `実績${d.analyzed ?? 0}投稿を分析${d.changes?.length ? ` 変更: ${d.changes.join(' / ').slice(0, 60)}` : '(変更なし)'}`;
+            else if (r.action === 'post_recycle') detail = `インプ${d.sourceImpressions ?? '-'}の投稿をリライト${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else detail = `投稿${d.postsCreated ?? '-'}本生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             return `<tr class="border-b border-slate-50"><td class="py-1 pr-3 text-slate-500">${esc((r.finished_at || '').slice(5, 16))}</td><td class="py-1 pr-3 font-bold">${WORKER_JA[r.worker_name] || r.worker_name}</td><td class="py-1 pr-3">${ACTION_JA[r.action] || r.action}</td><td class="py-1 pr-3">${r.status === 'success' ? '<span class="text-emerald-600">成功</span>' : '<span class="text-red-500">失敗</span>'}</td><td class="py-1 text-slate-500">${esc(detail)}</td></tr>`;
           }).join('')}</tbody>
@@ -382,7 +396,48 @@ async function renderApprove() {
     toast(`${data.approved}本を承認しました${data.skipped ? `(QA未通過 ${data.skipped}本は保留)` : ''}`);
     renderApprove(); updateApprovalBadge();
   });
+
+  document.getElementById('approve-all-replies-btn')?.addEventListener('click', async () => {
+    const { data } = await axios.post('/api/replies/approve-all');
+    toast(`返信${data.approved}件を承認しました(次の自動サイクルで送信されます)`);
+    renderApprove();
+  });
+
+  document.querySelectorAll('.reply-decision-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const { id, decision } = btn.dataset;
+      try {
+        await axios.post(`/api/replies/${id}/decision`, { decision });
+        toast(decision === 'approved' ? '返信を承認しました(次の自動サイクルで送信)' : '返信を却下しました');
+        renderApprove();
+      } catch (e) {
+        toast('処理に失敗しました', 'error');
+      }
+    });
+  });
   bindDecisionButtons();
+}
+
+function replyCard(r) {
+  return `
+  <article class="bg-white rounded-xl shadow p-4 flex flex-col gap-2">
+    <div class="flex items-center justify-between">
+      <span class="text-xs font-bold text-brand-navy bg-slate-100 px-2 py-1 rounded"><i class="fas fa-at mr-1"></i>${esc(r.mention_author || '')}</span>
+      ${qaBadge(r.qa_status, r.qa_issues)}
+    </div>
+    <div class="bg-slate-50 rounded-lg p-2 text-xs text-slate-500">
+      <p class="font-bold mb-1">受信メンション:</p>
+      <p class="whitespace-pre-wrap">${esc((r.mention_text || '').slice(0, 200))}</p>
+    </div>
+    <div class="text-sm">
+      <p class="text-xs font-bold text-slate-400 mb-1">Soraの返信案:</p>
+      <p class="whitespace-pre-wrap leading-relaxed">${esc(r.draft_body)}</p>
+    </div>
+    <div class="flex gap-2 pt-1">
+      <button class="reply-decision-btn flex-1 bg-emerald-600 text-white py-1.5 rounded-lg text-xs font-bold hover:opacity-90" data-id="${esc(r.reply_id)}" data-decision="approved"><i class="fas fa-check mr-1"></i>承認(自動送信)</button>
+      <button class="reply-decision-btn flex-1 bg-slate-200 text-slate-600 py-1.5 rounded-lg text-xs font-bold hover:bg-slate-300" data-id="${esc(r.reply_id)}" data-decision="rejected"><i class="fas fa-xmark mr-1"></i>却下</button>
+    </div>
+  </article>`;
 }
 
 function qaBadge(qa_status, qa_issues) {

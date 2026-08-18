@@ -38,6 +38,9 @@
 | GET | `/api/posts?status=pending` | X投稿一覧(ゲート②) |
 | POST | `/api/posts/:id/decision` | 投稿の承認/差戻 `{decision, reason?}` |
 | POST | `/api/posts/approve-all` | QA通過分を一括承認 |
+| GET | `/api/replies?status=pending` | リプライ返信下書き一覧(ゲート②) |
+| POST | `/api/replies/:id/decision` | 返信の承認/却下 `{decision, body?}`(承認時に本文編集可) |
+| POST | `/api/replies/approve-all` | QA通過の返信を一括承認 |
 | GET | `/api/notes` / `/api/notes/:id` | note記事一覧/全文(ゲート③) |
 | POST | `/api/notes/:id/publish` | note公開(QA=NGは拒否) |
 | GET | `/api/kpi?days=14` | KPI履歴+サマリ |
@@ -71,7 +74,7 @@
 
 ## データアーキテクチャ
 - **ストレージ**: Cloudflare D1(ローカルは `--local` SQLite) + R2(生成画像の保存)
-- **テーブル**: `worker_status` / `worker_logs` / `topic_candidates` / `x_posts` / `note_articles`(note_url・cover_image_id列含む) / `kpi_daily` / `approval_queue` / `task_queue` / `affiliate_links` / `glossary` / `generated_images` / `daily_reports`(Nana) / `analysis_reports`(Rui・競合リサーチ含む) / `weekly_plans`(Alex) / `auth_users` / `auth_sessions` / `app_settings`
+- **テーブル**: `worker_status` / `worker_logs` / `topic_candidates` / `x_posts`(recycled_from列でリサイクル追跡) / `note_articles`(note_url・cover_image_id列含む) / `kpi_daily` / `approval_queue` / `task_queue` / `affiliate_links` / `glossary` / `generated_images` / `daily_reports`(Nana) / `analysis_reports`(Rui・競合リサーチ含む) / `weekly_plans`(Alex) / `auth_users` / `auth_sessions` / `app_settings` / `x_replies`(リプライ返信)
 - **KPI収集の仕組み(ほぼ全自動)**:
   - 自動(X API従量課金 — 月$1.5程度): Xフォロワー数(`/2/users/me` $0.01/回)、Xインプレ/エンゲージメント(`/2/users/{id}/tweets` Owned Read $0.001/件・直近20投稿)
   - 自動(note公開API — 無料): noteフォロワー数・スキ累計(KPI画面でnoteユーザー名を設定すると有効化)
@@ -156,6 +159,9 @@
 7. **全自動パイプライン(「朝起きたら全部揃っている」運用)**: 毎朝JST 5時台に KPI自動収集 → [月曜のみ]Riko競合リサーチ+Alex週次計画 → Riko巡回(10ネタ) → Kai上位4ネタ深堀り翻訳 → 話題ツイート収集(日本語・Yahoo!リアルタイム検索) → Yuto12枠執筆(枠6=引用RT、枠11=公開済みnote実URL宣伝・発売モード対応) → Aki画像計画(全12枠を判定→必要な枠に最大8枚生成→Mio QA合格分のみ添付) → note記事1本執筆(日曜=有料¥100・土曜=メンバー限定・毎月1日=月次まとめ¥500) → Aki noteカバー画像生成+有料記事は本文用図解最大2枚 → Rui分析(日曜は週次、毎月1日は月次も。月次は売上TOP記事の共通点+価格別CVR分析付き) → Nana日次レポート。取締役の操作はゲート②の一括承認+ゲート③のnote公開判断のみ
 8. **枠6 引用RT(無料実装)**: Yahoo!リアルタイム検索で日本語の話題ツイートを収集(RT×2+リプ数でスコアリング、スパム/挨拶投稿除外、引用済み除外)→Yutoが「僕の視点の気づき」を添えた引用コメントを執筆→承認画面に引用元原文を表示→投稿時は`quote_tweet_id`で本物の引用RTに。投稿直前にoEmbedで引用元の生存確認(削除済みなら通常投稿に自動切替)。候補なしの日は従来型の通常投稿
 9. **Sora自動予約投稿**: 毎時cronが承認済み・投稿時刻到来の投稿を自動でXへ(画像添付・引用RT・**長文はスレッド自動分割投稿**対応)。X APIキー未登録の間は何もせずエラーにもならない
+10. **リプライ自動返信(P1-4)**: JST 8/12/18/22時にメンションを自動回収($0.001/件・since_id差分取得)→Soraが返信案を生成(gpt-5-mini・スパムはSKIP判定)→Mio QA→ゲート②の「リプライ返信の承認」で承認→毎時cronが自動送信($0.015/件)。キー未登録時は安全にスキップ
+11. **投稿時間最適化(P1-5)**: 毎週月曜に直近60日の投稿別実績から枠ごとのベスト時間帯を再計算(デフォルト±2時間内・3投稿以上・10%以上改善の時のみ採用)し、以降の予約時刻に自動反映。実績がない間はデフォルトのまま
+12. **高実績投稿リサイクル(P1-6)**: 14日以上前に公開したインプ上位投稿を1日1本、Yutoが新しい切り口でリライトしてゲート②へ(同じ元投稿は1度だけ・引用RT/note告知は対象外)
 9. **note公開(ゲート③)**: 承認画面で「全文プレビュー」→有料記事はオレンジの破線が有料化ライン。「Markdownをコピー」→noteエディタに貼付→価格(単発¥100/月次まとめ¥500)と有料ラインを設定して公開→アプリの「公開する」ボタンで記録→**公開後にnoteの実URLを登録**(翌日以降の枠11が実URL付き宣伝に切替わる)
 10. **KPI入力ルーティン(1日2分)**: KPI画面で ①初回のみnoteユーザー名を設定(自動収集が有効化) ②毎日: Xアナリティクスのインプレとnoteダッシュボードの売上・メンバー数を転記して保存 ③売れた記事は「記事別売上」にも入力(Ruiの分析精度が上がる)
 8. **初回ログイン**: 許可メールアドレスと新しいパスワード(8文字以上)で初回登録。2回目以降は同じメール+パスワードでログイン(30日間有効)

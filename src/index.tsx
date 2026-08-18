@@ -182,6 +182,46 @@ app.post('/api/posts/approve-all', async (c) => {
 })
 
 // ============================================================
+// リプライ自動返信 (P1-4): 下書き一覧・承認・却下
+// ============================================================
+
+app.get('/api/replies', async (c) => {
+  const { DB } = c.env
+  const status = c.req.query('status') ?? 'pending'
+  try {
+    const rows = await DB.prepare(
+      "SELECT * FROM x_replies WHERE approval_status = ? AND draft_body != '' ORDER BY created_at DESC LIMIT 50",
+    ).bind(status).all()
+    return c.json({ replies: rows.results })
+  } catch {
+    return c.json({ replies: [] }) // テーブル未作成でも壊れない
+  }
+})
+
+app.post('/api/replies/:id/decision', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const { decision, body } = await c.req.json<{ decision: 'approved' | 'rejected'; body?: string }>()
+  if (!['approved', 'rejected'].includes(decision)) return c.json({ error: 'invalid decision' }, 400)
+  if (decision === 'approved' && body && body.trim()) {
+    // 承認時に本文を編集して送る場合
+    await DB.prepare('UPDATE x_replies SET approval_status = ?, draft_body = ? WHERE reply_id = ?').bind(decision, body.trim(), id).run()
+  } else {
+    await DB.prepare('UPDATE x_replies SET approval_status = ? WHERE reply_id = ?').bind(decision, id).run()
+  }
+  return c.json({ ok: true, reply_id: id, decision })
+})
+
+// 返信一括承認 (QA通過分のみ)
+app.post('/api/replies/approve-all', async (c) => {
+  const { DB } = c.env
+  const result = await DB.prepare(
+    "UPDATE x_replies SET approval_status = 'approved' WHERE approval_status = 'pending' AND qa_status = 'ok' AND draft_body != ''",
+  ).run()
+  return c.json({ ok: true, approved: result.meta.changes ?? 0 })
+})
+
+// ============================================================
 // 承認ゲート③ 有料note公開直前
 // ============================================================
 
@@ -762,7 +802,7 @@ app.post('/api/riko/crawl', async (c) => {
 app.get('/api/cron/status', async (c) => {
   const { DB } = c.env
   const logs = await DB.prepare(
-    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'image_plan', 'note_diagrams', 'auto_note', 'daily_analysis', 'weekly_analysis', 'monthly_analysis', 'daily_report', 'quote_crawl', 'auto_publish', 'kpi_collect', 'competitor_research', 'monthly_note', 'note_cover') ORDER BY id DESC LIMIT 22"
+    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'image_plan', 'note_diagrams', 'auto_note', 'daily_analysis', 'weekly_analysis', 'monthly_analysis', 'daily_report', 'quote_crawl', 'auto_publish', 'kpi_collect', 'competitor_research', 'monthly_note', 'note_cover', 'mention_collect', 'reply_publish', 'slot_optimize', 'post_recycle') ORDER BY id DESC LIMIT 22"
   ).all()
   return c.json({
     secretConfigured: !!c.env.CRON_SECRET,

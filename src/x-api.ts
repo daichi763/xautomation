@@ -319,3 +319,55 @@ export async function fetchMyTweetsMetrics(
     return { ok: false, error: e?.message || 'ネットワークエラー' }
   }
 }
+
+// 自分宛てメンションの取得
+// (GET /2/users/{id}/mentions — Owned Read $0.001/リソース。since_idで差分取得し重複課金を回避)
+export interface XMention {
+  tweetId: string
+  authorId: string
+  authorUsername: string
+  text: string
+  createdAt: string
+}
+
+export async function fetchMyMentions(
+  creds: XCredentials,
+  userId: string,
+  sinceId?: string,
+): Promise<{ ok: boolean; mentions?: XMention[]; newestId?: string; error?: string }> {
+  const url = `https://api.twitter.com/2/users/${userId}/mentions`
+  const params: Record<string, string> = {
+    max_results: '20',
+    'tweet.fields': 'author_id,created_at',
+    expansions: 'author_id',
+    'user.fields': 'username',
+  }
+  if (sinceId) params.since_id = sinceId
+  try {
+    const auth = await buildOAuthHeader(creds, 'GET', url, params)
+    const qs = Object.keys(params).sort().map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`).join('&')
+    const res = await fetch(`${url}?${qs}`, { headers: { 'Authorization': auth } })
+    const data: any = await res.json()
+    if (!res.ok) {
+      return { ok: false, error: data?.detail || data?.title || `HTTP ${res.status}` }
+    }
+    const users: Record<string, string> = {}
+    for (const u of data.includes?.users || []) {
+      if (u?.id) users[u.id] = u.username || ''
+    }
+    const mentions: XMention[] = []
+    for (const t of (Array.isArray(data.data) ? data.data : [])) {
+      if (!t?.id) continue
+      mentions.push({
+        tweetId: String(t.id),
+        authorId: String(t.author_id || ''),
+        authorUsername: users[t.author_id] || '',
+        text: String(t.text || ''),
+        createdAt: String(t.created_at || ''),
+      })
+    }
+    return { ok: true, mentions, newestId: data.meta?.newest_id ? String(data.meta.newest_id) : undefined }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'ネットワークエラー' }
+  }
+}
