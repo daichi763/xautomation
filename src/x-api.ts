@@ -115,3 +115,25 @@ export async function uploadMedia(creds: XCredentials, imageB64: string): Promis
     return { ok: false, error: e?.message || 'ネットワークエラー' }
   }
 }
+
+// 自分のアカウント情報取得 (GET /2/users/me — 無料プランで利用可、24h/25リクエスト制限内)
+export async function fetchMyProfile(creds: XCredentials): Promise<{ ok: boolean; followers?: number; username?: string; error?: string }> {
+  const url = 'https://api.twitter.com/2/users/me'
+  try {
+    const auth = await buildOAuthHeader(creds, 'GET', url, { 'user.fields': 'public_metrics' })
+    const res = await fetch(`${url}?user.fields=public_metrics`, {
+      headers: { 'Authorization': auth },
+    })
+    const data: any = await res.json()
+    if (!res.ok) {
+      return { ok: false, error: data?.detail || data?.title || `HTTP ${res.status}` }
+    }
+    return {
+      ok: true,
+      followers: data.data?.public_metrics?.followers_count ?? 0,
+      username: data.data?.username,
+    }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'ネットワークエラー' }
+  }
+}

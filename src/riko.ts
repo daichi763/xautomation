@@ -121,3 +121,95 @@ export async function runRikoCrawl(db: D1Database, apiKey: string): Promise<Riko
 
   return { ok: true, collected: items.length, inserted, topics: insertedTopics, errors, costUsd: llm.costUsd || 0 }
 }
+
+// ============================================================
+// Riko週次競合リサーチ(Phase D): 売れているAI副業系noteの傾向を収集し
+// Alexの週次計画+月次まとめの価格・タイトル戦略の材料にする
+// ソース: Yahoo!リアルタイム検索(無料)で「note 有料 AI」系の話題投稿を収集 → gpt-5で傾向分析
+// ============================================================
+export interface CompetitorResearchResult {
+  ok: boolean
+  reportId?: string
+  bodyMd?: string
+  collected: number
+  costUsd: number
+  error?: string
+}
+
+const COMPETITOR_KEYWORDS = ['AI副業 note 有料', 'note 売れた AI', 'ChatGPT note 販売', 'note 有料記事 収益']
+
+export async function runRikoCompetitorResearch(db: D1Database, apiKey: string): Promise<CompetitorResearchResult> {
+  const result: CompetitorResearchResult = { ok: false, collected: 0, costUsd: 0 }
+  try {
+    // 週次重複ガード
+    const dup = await db
+      .prepare(`SELECT report_id FROM analysis_reports WHERE report_type = 'competitor' AND created_at > datetime('now', '-6 days') LIMIT 1`)
+      .first()
+    if (dup) {
+      result.ok = true
+      result.error = '今週分は作成済みのためスキップ'
+      return result
+    }
+
+    const { fetchYahooRealtime } = await import('./sources')
+    const all: any[] = []
+    for (const kw of COMPETITOR_KEYWORDS) {
+      try {
+        const tweets = await fetchYahooRealtime(kw)
+        all.push(...tweets.map((t) => ({ ...t, keyword: kw })))
+        await new Promise((r) => setTimeout(r, 800))
+      } catch { /* キーワード単位の失敗は無視 */ }
+    }
+    // 重複除去 + エンゲージメント順
+    const seen = new Set<string>()
+    const uniq = all.filter((t) => { if (seen.has(t.tweetId)) return false; seen.add(t.tweetId); return true })
+      .sort((a, b) => (b.rtCount * 2 + b.replyCount) - (a.rtCount * 2 + a.replyCount))
+      .slice(0, 20)
+    result.collected = uniq.length
+
+    if (uniq.length === 0) {
+      result.error = '競合情報の収集0件(今週はスキップ)'
+      result.ok = true
+      return result
+    }
+
+    const material = uniq.map((t, i) => `${i + 1}. [@${t.screenName} RT${t.rtCount}/返信${t.replyCount}] ${String(t.text).slice(0, 200)}`).join('\n')
+
+    const llm = await callOpenAI(
+      apiKey,
+      'gpt-5',
+      `あなたは「Riko」— 「Mさん / 海外AI副業の検証部屋」の企画・リサーチ担当です。X上で観測された「AI副業系noteの販売・購入に関する生の声」から、自アカウントのnote販売戦略に活かせる競合トレンドレポートを作成します。
+
+## レポート構成(Markdown・800字以内)
+1. **今売れているテーマ**: 観測された話題から売れ筋の切り口を2〜3個
+2. **価格帯の相場感**: 言及されている価格があれば整理
+3. **タイトルの傾向**: 反応が良いタイトルパターン
+4. **来週うちが取るべき差別化**: 具体提案2つ(自アカウントは 単発¥100/月次まとめ¥500/メンバーシップ¥500月 の低価格・検証特化路線)
+
+事実ベースで書き、観測データにないことは推測と明示すること。`,
+      `## 観測データ(Yahoo!リアルタイム検索より・直近の話題投稿${uniq.length}件)\n${material}`,
+      10000,
+      'medium',
+    )
+    if (!llm.ok) {
+      result.error = `競合分析失敗: ${llm.error}`
+      return result
+    }
+    result.costUsd = llm.costUsd || 0
+
+    const reportId = `ar-c-${Date.now()}`
+    const today = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)
+    await db
+      .prepare(`INSERT INTO analysis_reports (report_id, report_type, report_date, body_md, proposals_json, cost_usd) VALUES (?, 'competitor', ?, ?, NULL, ?)`)
+      .bind(reportId, today, llm.content, result.costUsd)
+      .run()
+
+    result.ok = true
+    result.reportId = reportId
+    result.bodyMd = llm.content
+    return result
+  } catch (e: any) {
+    result.error = e?.message || '競合リサーチエラー'
+    return result
+  }
+}

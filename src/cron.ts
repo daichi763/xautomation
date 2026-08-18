@@ -1,17 +1,18 @@
 // 全自動パイプライン(指示書準拠):
 // [月曜] Alex週次計画 → Riko収集 → Kai翻訳 → Yuto執筆(+Aki枠3図解) → note執筆 → Rui分析(日曜は週次も) → Nana日次レポート
 // 取締役の承認はゲート②(投稿一括)・ゲート③(有料note)のみ。途中承認なし。
-import { runRikoCrawl } from './riko'
+import { runRikoCrawl, runRikoCompetitorResearch } from './riko'
 import { translateSource } from './kai'
 import { callOpenAI, YUTO_SYSTEM } from './llm'
 import { runQaCheck } from './qa-rules'
 import { runAlexWeeklyPlan, getCurrentWeekPlan } from './alex'
-import { runNoteWriter, todayNoteType } from './note-writer'
-import { runAkiInfographic } from './aki'
+import { runNoteWriter, runMonthlySummaryNote } from './note-writer'
+import { runAkiInfographic, runAkiNoteCover } from './aki'
 import { runRuiDaily, runRuiWeekly, runRuiMonthly } from './rui'
 import { runNanaReport } from './nana'
 import { collectJaHotTweets, type JaHotTweet } from './sources'
 import { runSoraScheduledPublish, type SoraPublishResult } from './sora'
+import { collectKpiAuto } from './kpi-collector'
 
 // 指示書§05 12枠タイムテーブル
 export const SLOT_TABLE: { slot: number; time: string; type: string; limit: string }[] = [
@@ -62,12 +63,16 @@ async function logWorker(db: D1Database, worker: string, action: string, ok: boo
 
 export interface PipelineResult {
   ok: boolean
+  kpi: { collected: boolean; xFollowers?: number; noteFollowers?: number; errors: string[] }
   alex: { ran: boolean; theme?: string; costUsd: number; error?: string }
   riko: { collected: number; inserted: number; costUsd: number; errors: string[] }
+  competitor: { ran: boolean; collected: number; costUsd: number; error?: string }
   kai: { translated: number; costUsd: number; errors: string[] }
   yuto: { postsCreated: number; costUsd: number; errors: string[] }
   aki: { generated: boolean; qaStatus?: string; costUsd: number; error?: string }
   note: { created: boolean; type?: string; title?: string; costUsd: number; error?: string }
+  noteCover: { generated: boolean; costUsd: number; error?: string }
+  monthlyNote: { created: boolean; title?: string; costUsd: number; error?: string }
   quote: { found: boolean; author?: string; score?: number; errors: string[] }
   rui: { daily: boolean; weekly: boolean; monthly: boolean; costUsd: number; errors: string[] }
   nana: { reported: boolean; costUsd: number; error?: string }
@@ -82,20 +87,44 @@ function jstDay(): number {
 }
 
 // フルパイプライン実行(朝1回)
-export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: string): Promise<PipelineResult> {
+export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: string, env?: Record<string, string | undefined>): Promise<PipelineResult> {
   const result: PipelineResult = {
     ok: false,
+    kpi: { collected: false, errors: [] },
     alex: { ran: false, costUsd: 0 },
     riko: { collected: 0, inserted: 0, costUsd: 0, errors: [] },
+    competitor: { ran: false, collected: 0, costUsd: 0 },
     kai: { translated: 0, costUsd: 0, errors: [] },
     yuto: { postsCreated: 0, costUsd: 0, errors: [] },
     aki: { generated: false, costUsd: 0 },
     note: { created: false, costUsd: 0 },
+    noteCover: { generated: false, costUsd: 0 },
+    monthlyNote: { created: false, costUsd: 0 },
     quote: { found: false, errors: [] },
     rui: { daily: false, weekly: false, monthly: false, costUsd: 0, errors: [] },
     nana: { reported: false, costUsd: 0 },
     mio: { checked: 0, ok: 0, needsFix: 0, ng: 0 },
     totalCostUsd: 0,
+  }
+
+  // ========== Phase -1: Nana KPI自動収集(Xフォロワー/noteフォロワー — 取れるものは全自動) ==========
+  try {
+    const kpi = await collectKpiAuto(db, env || {})
+    result.kpi = { collected: kpi.ok, xFollowers: kpi.xFollowers, noteFollowers: kpi.noteFollowers, errors: kpi.errors.slice(0, 3) }
+    await logWorker(db, 'nana', 'kpi_collect', kpi.ok, { xFollowers: kpi.xFollowers, noteFollowers: kpi.noteFollowers, noteLikes: kpi.noteLikesTotal, sources: kpi.sources, errors: kpi.errors.slice(0, 3) })
+  } catch (e: any) {
+    result.kpi.errors.push(e?.message || 'KPI収集エラー')
+  }
+
+  // ========== Phase -0.5: Riko 競合リサーチ(月曜・Alex計画の前に実行して材料にする) ==========
+  if (jstDay() === 1) {
+    try {
+      const comp = await runRikoCompetitorResearch(db, apiKey)
+      result.competitor = { ran: comp.ok && !comp.error?.includes('スキップ'), collected: comp.collected, costUsd: comp.costUsd, error: comp.error }
+      if (result.competitor.ran) await logWorker(db, 'riko', 'competitor_research', true, { collected: comp.collected, reportId: comp.reportId, costUsd: comp.costUsd })
+    } catch (e: any) {
+      result.competitor.error = e?.message
+    }
   }
 
   // ========== Phase 0: Alex 週次計画(月曜、または今週分未作成なら作成) ==========
@@ -165,6 +194,23 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
 
   let slot3Created: { postId: string; body: string; topicTitle: string } | null = null
 
+  // 枠11用: 最新の公開済みnote(実URLあり)を取得 — 実際の記事への導線を作る
+  let latestNote: any = null
+  try {
+    latestNote = await db
+      .prepare(`SELECT title, type, price_yen, note_url FROM note_articles WHERE note_url IS NOT NULL AND note_url != '' ORDER BY published_at DESC LIMIT 1`)
+      .first()
+  } catch { /* なければ従来型 */ }
+
+  // 発売日モード: 最新公開記事が有料(直近2日以内に公開)なら、枠2/枠11を販売導線強化
+  let saleMode = false
+  try {
+    const recentPaid = await db
+      .prepare(`SELECT article_id FROM note_articles WHERE type IN ('paid_single','monthly_summary') AND note_url IS NOT NULL AND published_at > datetime('now', '-2 days') LIMIT 1`)
+      .first()
+    saleMode = !!recentPaid
+  } catch { /* 無視 */ }
+
   // 枠6用: 日本語の話題ツイートを収集(Yahoo!リアルタイム検索・無料)。見つからなければ従来型にフォールバック
   let quoteTarget: JaHotTweet | null = null
   try {
@@ -188,7 +234,21 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
   for (const slotDef of SLOT_TABLE) {
     const { topic, markdown } = translations[(slotDef.slot - 1) % translations.length]
     const isQuoteSlot = slotDef.slot === 6 && quoteTarget !== null
-    const userPrompt = isQuoteSlot
+    const isNotePromoSlot = slotDef.slot === 11 && latestNote !== null
+    const noteTypeJa = latestNote?.type === 'monthly_summary' ? `月次まとめ(¥${latestNote.price_yen})` : latestNote?.type === 'paid_single' ? `有料検証レポート(¥${latestNote.price_yen})` : latestNote?.type === 'membership' ? 'メンバーシップ限定' : '無料記事'
+    const userPrompt = isNotePromoSlot
+      ? `以下の公開済みnote記事へ読者を誘導するX投稿を1本執筆してください(枠11: note告知 / 22:30投稿 / 100字以内+URL)。
+
+▓告知するnote記事:
+- タイトル: ${latestNote.title}
+- 種別: ${noteTypeJa}
+- URL: ${latestNote.note_url}
+
+▓執筆ルール:
+- 本文の最後に必ずURLをそのまま含める(短縮・改変禁止)
+- 記事で得られるものを1つだけ具体的に伝える(「書きました」だけはNG)
+- 売り込み感を出しすぎない。僕の一言感想を添える${saleMode && latestNote.type !== 'free' ? '\n- 本日は有料記事の発売直後。価格(¥' + latestNote.price_yen + ')の手に取りやすさと、買うと何が分かるかを自然に伝える' : ''}${todayFocus}`
+      : isQuoteSlot
       ? `以下の日本語の話題ツイートを引用リツイートするコメントを1本執筆してください(枠6: 引用RT / 14:00投稿 / 100字以内)。
 
 ▓引用元ツイート(@${quoteTarget!.screenName} / ${quoteTarget!.author}):
@@ -208,7 +268,7 @@ ${quoteTarget!.text.slice(0, 500)}
 ${markdown.slice(0, 2500)}
 
 ▓参考: 既存の用語注釈集(同じ固有名詞はこの注釈を使う)
-${glossaryNote}${todayFocus}`
+${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指示: 本日は有料noteの発売直後です。1日の予告の中で「夜にnoteの話をします」的な自然な前振りを1文入れる' : ''}`
 
     const written = await callOpenAI(apiKey, 'gpt-5', YUTO_SYSTEM, userPrompt, 3000)
     if (!written.ok) {
@@ -288,15 +348,54 @@ ${glossaryNote}${todayFocus}`
     }
   }
 
-  // ========== Phase 6: Yuto note記事執筆(毎日1本: 日曜=有料・他=無料 → ゲート③) ==========
+  // ========== Phase 6: Yuto note記事執筆(毎日1本: 日曜=有料¥100・土曜=メンバー限定・他=無料 → ゲート③) ==========
+  let createdArticleId: string | null = null
+  let createdArticleTitle = ''
+  let createdArticleType = ''
   try {
     // note向きのネタ(翻訳済みの中で本日未使用のものを優先、なければ先頭)
     const noteTopic = translations[translations.length - 1] || translations[0]
     const note = await runNoteWriter(db, apiKey, noteTopic.topic, noteTopic.markdown)
     result.note = { created: note.ok, type: note.type, title: note.title, costUsd: note.costUsd, error: note.error }
+    if (note.ok && note.articleId) {
+      createdArticleId = note.articleId
+      createdArticleTitle = note.title || ''
+      createdArticleType = note.type
+    }
     await logWorker(db, 'yuto', 'auto_note', note.ok, { articleId: note.articleId, type: note.type, title: note.title, qaStatus: note.qaStatus, costUsd: note.costUsd, error: note.error })
   } catch (e: any) {
     result.note.error = e?.message
+  }
+
+  // ========== Phase 6.3: Yuto 月次まとめnote(¥500・主力商品・毎月1日) ==========
+  const jstDateNum = new Date(Date.now() + 9 * 3600 * 1000).getUTCDate()
+  if (jstDateNum === 1) {
+    try {
+      const ms = await runMonthlySummaryNote(db, apiKey)
+      result.monthlyNote = { created: ms.ok && !ms.error?.includes('スキップ'), title: ms.title, costUsd: ms.costUsd, error: ms.error }
+      if (result.monthlyNote.created) {
+        await logWorker(db, 'yuto', 'monthly_note', true, { articleId: ms.articleId, title: ms.title, qaStatus: ms.qaStatus, costUsd: ms.costUsd })
+        // カバー画像は月次まとめを優先
+        if (ms.articleId) {
+          createdArticleId = ms.articleId
+          createdArticleTitle = ms.title || ''
+          createdArticleType = 'monthly_summary'
+        }
+      }
+    } catch (e: any) {
+      result.monthlyNote.error = e?.message
+    }
+  }
+
+  // ========== Phase 6.6: Aki noteカバー画像生成(購入率・読了率向上) ==========
+  if (createdArticleId) {
+    try {
+      const cover = await runAkiNoteCover(db, r2, apiKey, createdArticleId, createdArticleTitle, createdArticleType)
+      result.noteCover = { generated: cover.ok, costUsd: cover.costUsd, error: cover.error }
+      await logWorker(db, 'aki', 'note_cover', cover.ok, { imageId: cover.imageId, articleId: createdArticleId, qaStatus: cover.qaStatus, costUsd: cover.costUsd, error: cover.error })
+    } catch (e: any) {
+      result.noteCover.error = e?.message
+    }
   }
 
   // ========== Phase 7: Rui 分析(毎日日次、日曜は週次も) ==========
@@ -338,8 +437,9 @@ ${glossaryNote}${todayFocus}`
   }
 
   result.totalCostUsd =
-    result.alex.costUsd + result.riko.costUsd + result.kai.costUsd + result.yuto.costUsd +
-    result.aki.costUsd + result.note.costUsd + result.rui.costUsd + result.nana.costUsd
+    result.alex.costUsd + result.riko.costUsd + result.competitor.costUsd + result.kai.costUsd + result.yuto.costUsd +
+    result.aki.costUsd + result.note.costUsd + result.noteCover.costUsd + result.monthlyNote.costUsd +
+    result.rui.costUsd + result.nana.costUsd
   result.ok = result.yuto.postsCreated > 0
   if (!result.ok) result.error = 'Yuto執筆が全件失敗しました'
   return result
@@ -382,7 +482,7 @@ export async function runHourlyTick(
       .bind(jstToday).first()
     if (!already) {
       result.mode = 'pipeline'
-      result.pipeline = await runDailyPipeline(db, r2, String(env.OPENAI_API_KEY || ''))
+      result.pipeline = await runDailyPipeline(db, r2, String(env.OPENAI_API_KEY || ''), env)
       result.ok = result.pipeline.ok
       if (!result.pipeline.ok) result.error = result.pipeline.error
     }

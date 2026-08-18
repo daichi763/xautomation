@@ -183,7 +183,7 @@ app.post('/api/posts/approve-all', async (c) => {
 
 app.get('/api/notes', async (c) => {
   const { DB } = c.env
-  const rows = await DB.prepare('SELECT article_id, topic_id, title, type, price_yen, approval_status, qa_status, published_at, view_count, sales_count, revenue_yen, created_at FROM note_articles ORDER BY created_at DESC').all()
+  const rows = await DB.prepare('SELECT article_id, topic_id, title, type, price_yen, approval_status, qa_status, published_at, view_count, sales_count, revenue_yen, note_url, cover_image_id, created_at FROM note_articles ORDER BY created_at DESC').all()
   return c.json({ articles: rows.results })
 })
 
@@ -205,6 +205,47 @@ app.post('/api/notes/:id/publish', async (c) => {
   // note_publisher タスク投入(本番では Browser Rendering)
   await DB.prepare("INSERT INTO task_queue (worker_name, task_type, payload, priority) VALUES ('sora', 'note_publish', ?, 1)")
     .bind(JSON.stringify({ article_id: id })).run()
+  return c.json({ ok: true, article_id: id })
+})
+
+// Riko競合リサーチの手動実行(通常は毎週月曜に自動実行)
+app.post('/api/reports/competitor/run', async (c) => {
+  const { runRikoCompetitorResearch } = await import('./riko')
+  const result = await runRikoCompetitorResearch(c.env.DB, c.env.OPENAI_API_KEY || '')
+  return c.json(result, result.ok ? 200 : 502)
+})
+
+// 月次まとめnote(¥500)の手動生成(通常は毎月1日に自動実行。テスト・再生成用)
+app.post('/api/notes/monthly/run', async (c) => {
+  const { runMonthlySummaryNote } = await import('./note-writer')
+  const result = await runMonthlySummaryNote(c.env.DB, c.env.OPENAI_API_KEY || '')
+  return c.json(result, result.ok ? 200 : 502)
+})
+
+// note実URLの登録(公開後に取締役が貼り付け → 枠11の告知投稿が実URL連動になる)
+app.post('/api/notes/:id/url', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const { note_url } = await c.req.json<{ note_url: string }>()
+  if (!note_url || !/^https:\/\/note\.com\//.test(note_url)) {
+    return c.json({ error: 'note.com のURLを入力してください(例: https://note.com/xxx/n/xxxx)' }, 400)
+  }
+  await DB.prepare('UPDATE note_articles SET note_url = ? WHERE article_id = ?').bind(note_url.trim(), id).run()
+  return c.json({ ok: true, article_id: id, note_url: note_url.trim() })
+})
+
+// 記事別売上の手動入力(noteダッシュボードの数字を反映 → Ruiが売れ筋分析に使用)
+app.post('/api/notes/:id/stats', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const { view_count, sales_count, revenue_yen } = await c.req.json<{ view_count?: number; sales_count?: number; revenue_yen?: number }>()
+  await DB.prepare(
+    `UPDATE note_articles SET
+       view_count = COALESCE(?, view_count),
+       sales_count = COALESCE(?, sales_count),
+       revenue_yen = COALESCE(?, revenue_yen)
+     WHERE article_id = ?`,
+  ).bind(view_count ?? null, sales_count ?? null, revenue_yen ?? null, id).run()
   return c.json({ ok: true, article_id: id })
 })
 
@@ -452,6 +493,62 @@ app.post('/api/posts/:id/rewrite', async (c) => {
   return c.json({ post_id: id, body: result.content, qa, model: result.model, usage: result.usage, costUsd: result.costUsd })
 })
 
+// KPI手動入力(自動取得できない指標: インプレ・売上・メンバー数・アフィ収益。自動取得値は上書きしない)
+app.post('/api/kpi/daily', async (c) => {
+  const { DB } = c.env
+  const b = await c.req.json<any>()
+  const date = b.date || new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '日付形式は YYYY-MM-DD' }, 400)
+  const num = (v: any) => (v === undefined || v === null || v === '' ? null : Math.max(0, Math.floor(Number(v))))
+  await DB.prepare(
+    `INSERT INTO kpi_daily (date, x_followers, x_impressions_total, x_engagements_total, note_followers, note_paid_sales, membership_count, membership_revenue, affiliate_revenue)
+     VALUES (?, COALESCE(?,0), COALESCE(?,0), COALESCE(?,0), COALESCE(?,0), COALESCE(?,0), COALESCE(?,0), COALESCE(?,0), COALESCE(?,0))
+     ON CONFLICT(date) DO UPDATE SET
+       x_followers = COALESCE(?, x_followers),
+       x_impressions_total = COALESCE(?, x_impressions_total),
+       x_engagements_total = COALESCE(?, x_engagements_total),
+       note_followers = COALESCE(?, note_followers),
+       note_paid_sales = COALESCE(?, note_paid_sales),
+       membership_count = COALESCE(?, membership_count),
+       membership_revenue = COALESCE(?, membership_revenue),
+       affiliate_revenue = COALESCE(?, affiliate_revenue)`,
+  ).bind(
+    date,
+    num(b.x_followers), num(b.x_impressions_total), num(b.x_engagements_total), num(b.note_followers),
+    num(b.note_paid_sales), num(b.membership_count), num(b.membership_revenue), num(b.affiliate_revenue),
+    num(b.x_followers), num(b.x_impressions_total), num(b.x_engagements_total), num(b.note_followers),
+    num(b.note_paid_sales), num(b.membership_count), num(b.membership_revenue), num(b.affiliate_revenue),
+  ).run()
+  const row = await DB.prepare('SELECT * FROM kpi_daily WHERE date = ?').bind(date).first()
+  return c.json({ ok: true, kpi: row })
+})
+
+// KPI自動収集を手動トリガ(テスト用・即時更新用)
+app.post('/api/kpi/collect', async (c) => {
+  const { collectKpiAuto } = await import('./kpi-collector')
+  const result = await collectKpiAuto(c.env.DB, c.env as any)
+  return c.json(result, result.ok || result.errors.length < 2 ? 200 : 502)
+})
+
+// アプリ設定(noteユーザー名など)
+app.get('/api/settings', async (c) => {
+  const rows = await c.env.DB.prepare('SELECT key, value FROM app_settings').all()
+  const settings: Record<string, string> = {}
+  for (const r of (rows.results || []) as any[]) settings[r.key] = r.value
+  return c.json({ settings })
+})
+
+app.post('/api/settings', async (c) => {
+  const { key, value } = await c.req.json<{ key: string; value: string }>()
+  const ALLOWED = ['note_username']
+  if (!ALLOWED.includes(key)) return c.json({ error: `設定可能なキー: ${ALLOWED.join(', ')}` }, 400)
+  await c.env.DB.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = CURRENT_TIMESTAMP`,
+  ).bind(key, String(value || '').trim(), String(value || '').trim()).run()
+  return c.json({ ok: true, key, value: String(value || '').trim() })
+})
+
 app.get('/api/kpi', async (c) => {
   const { DB } = c.env
   const days = Math.min(parseInt(c.req.query('days') ?? '14'), 90)
@@ -602,7 +699,7 @@ app.post('/api/simulate/tick', async (c) => {
 
 // 手動パイプライン実行(UIボタンから。認証ミドルウェアで保護済み)
 app.post('/api/pipeline/run', async (c) => {
-  const result = await runDailyPipeline(c.env.DB, c.env.R2, c.env.OPENAI_API_KEY || '')
+  const result = await runDailyPipeline(c.env.DB, c.env.R2, c.env.OPENAI_API_KEY || '', c.env as any)
   return c.json(result, result.ok ? 200 : 502)
 })
 
@@ -624,7 +721,7 @@ app.post('/api/riko/crawl', async (c) => {
 app.get('/api/cron/status', async (c) => {
   const { DB } = c.env
   const logs = await DB.prepare(
-    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'auto_note', 'daily_analysis', 'weekly_analysis', 'monthly_analysis', 'daily_report', 'quote_crawl', 'auto_publish') ORDER BY id DESC LIMIT 18"
+    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'auto_note', 'daily_analysis', 'weekly_analysis', 'monthly_analysis', 'daily_report', 'quote_crawl', 'auto_publish', 'kpi_collect', 'competitor_research', 'monthly_note', 'note_cover') ORDER BY id DESC LIMIT 22"
   ).all()
   return c.json({
     secretConfigured: !!c.env.CRON_SECRET,
@@ -664,7 +761,8 @@ app.get('/api/reports/analysis', async (c) => {
   const daily = await DB.prepare("SELECT * FROM analysis_reports WHERE report_type = 'daily' ORDER BY created_at DESC LIMIT 3").all()
   const weekly = await DB.prepare("SELECT * FROM analysis_reports WHERE report_type = 'weekly' ORDER BY created_at DESC LIMIT 2").all()
   const monthly = await DB.prepare("SELECT * FROM analysis_reports WHERE report_type = 'monthly' ORDER BY created_at DESC LIMIT 2").all()
-  return c.json({ daily: daily.results, weekly: weekly.results, monthly: monthly.results })
+  const competitor = await DB.prepare("SELECT * FROM analysis_reports WHERE report_type = 'competitor' ORDER BY created_at DESC LIMIT 1").all()
+  return c.json({ daily: daily.results, weekly: weekly.results, monthly: monthly.results, competitor: competitor.results })
 })
 
 // Alex週次計画

@@ -287,7 +287,7 @@ async function renderApprove() {
             <span class="w-2 h-2 rounded-full ${cronStatus?.secretConfigured ? 'bg-emerald-500' : 'bg-amber-500'}"></span>
             定時実行 ${cronStatus?.secretConfigured ? '設定済み' : '未設定(手動ボタンは利用可)'}
           </span>
-          <span class="text-xs text-slate-500">🌅 毎朝1回: [月]Alex週次計画 → Riko巡回(10ネタ) → Kai翻訳 → Yuto12枠執筆+Aki枠3図解 → note執筆(日曜=有料) → Rui分析 → Nanaレポート</span>
+          <span class="text-xs text-slate-500">🌅 毎朝1回: NanaのKPI自動収集 → [月]Riko競合リサーチ+Alex週次計画 → Riko巡回 → Kai翻訳 → Yuto12枠執筆+Aki図解 → note執筆(日=有料¥100/土=メンバー限定/毎月1日=月次まとめ¥500)+Akiカバー画像 → Rui分析 → Nanaレポート / ⏰毎時: Sora自動投稿</span>
         </div>
         ${cronStatus?.recentRuns?.length ? `
         <div class="overflow-x-auto"><table class="w-full text-xs">
@@ -295,7 +295,7 @@ async function renderApprove() {
           <tbody>${cronStatus.recentRuns.map((r) => {
             let d = {}; try { d = JSON.parse(r.output_json || '{}'); } catch (e) {}
             const WORKER_JA = { alex: 'Alex', riko: 'Riko', kai: 'Kai', yuto: 'Yuto', aki: 'Aki', sora: 'Sora', rui: 'Rui', nana: 'Nana', mio: 'Mio' };
-            const ACTION_JA = { weekly_plan: '週次計画', auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: 'X執筆', auto_note: 'note執筆', auto_qa: 'QA審査', auto_infographic: '図解生成', daily_analysis: '日次分析', weekly_analysis: '週次分析', monthly_analysis: '月次分析', daily_report: '日次レポート', quote_crawl: '話題ツイート収集', auto_publish: '自動投稿', x_publish: 'X投稿(手動)' };
+            const ACTION_JA = { weekly_plan: '週次計画', auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: 'X執筆', auto_note: 'note執筆', auto_qa: 'QA審査', auto_infographic: '図解生成', daily_analysis: '日次分析', weekly_analysis: '週次分析', monthly_analysis: '月次分析', daily_report: '日次レポート', quote_crawl: '話題ツイート収集', auto_publish: '自動投稿', x_publish: 'X投稿(手動)', kpi_collect: 'KPI自動収集', competitor_research: '競合リサーチ', monthly_note: '月次まとめnote', note_cover: 'noteカバー画像' };
             let detail = '';
             if (r.worker_name === 'riko') detail = `収集${d.collected ?? '-'}件 → ネタ${d.inserted ?? '-'}件投入${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.worker_name === 'kai') detail = `翻訳${d.translated ?? '-'}本${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
@@ -303,8 +303,10 @@ async function renderApprove() {
             else if (r.worker_name === 'alex') detail = `テーマ:${d.theme ? esc(d.theme).slice(0, 30) : '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.worker_name === 'aki') detail = `図解「${d.title ? esc(d.title) : '-'}」 QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.worker_name === 'rui') detail = `分析完了${d.proposals != null ? ` 提案${d.proposals}つ` : ''}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.action === 'kpi_collect') detail = `Xフォロワー${d.xFollowers ?? '未取得'} / noteフォロワー${d.noteFollowers ?? '未取得'}`;
             else if (r.worker_name === 'nana') detail = `承認待ち${d.pending ?? '-'}件 / 滞留${d.stale ?? 0}件${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
-            else if (r.action === 'auto_note') detail = `note「${d.title ? esc(d.title).slice(0, 25) : '-'}」(${d.type === 'paid_single' ? '有料' : '無料'}) QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.action === 'auto_note') detail = `note「${d.title ? esc(d.title).slice(0, 25) : '-'}」(${d.type === 'paid_single' ? '有料¥100' : d.type === 'membership' ? 'メンバー限定' : '無料'}) QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.action === 'monthly_note') detail = `月次まとめ「${d.title ? esc(d.title).slice(0, 25) : '-'}」(¥500) QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else detail = `投稿${d.postsCreated ?? '-'}本生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             return `<tr class="border-b border-slate-50"><td class="py-1 pr-3 text-slate-500">${esc((r.finished_at || '').slice(5, 16))}</td><td class="py-1 pr-3 font-bold">${WORKER_JA[r.worker_name] || r.worker_name}</td><td class="py-1 pr-3">${ACTION_JA[r.action] || r.action}</td><td class="py-1 pr-3">${r.status === 'success' ? '<span class="text-emerald-600">成功</span>' : '<span class="text-red-500">失敗</span>'}</td><td class="py-1 text-slate-500">${esc(detail)}</td></tr>`;
           }).join('')}</tbody>
@@ -433,6 +435,7 @@ function topicCard(t) {
 
 function noteCard(n) {
   const typeJa = { free: '無料', paid_single: `有料 ¥${n.price_yen}`, monthly_summary: `月次まとめ ¥${n.price_yen}`, membership: 'メンバーシップ' };
+  const published = n.approval_status === 'published';
   return `
   <article class="note-card bg-white rounded-xl shadow p-4 mb-3">
     <div class="flex items-center justify-between flex-wrap gap-2">
@@ -441,14 +444,20 @@ function noteCard(n) {
           <span class="text-[10px] ${n.type === 'free' ? 'bg-slate-500' : 'bg-brand-orange'} text-white px-2 py-0.5 rounded-full font-bold">${typeJa[n.type] || n.type}</span>
           ${qaBadge(n.qa_status, null)}
           <span class="text-[10px] text-slate-400">${esc((n.created_at || '').slice(0, 10))}</span>
+          ${n.note_url ? `<a href="${esc(n.note_url)}" target="_blank" class="text-[10px] text-emerald-600 underline"><i class="fas fa-link mr-0.5"></i>noteで見る</a>` : ''}
         </div>
         <h3 class="font-bold">${esc(n.title)}</h3>
       </div>
-      <div class="flex gap-2">
+      <div class="flex gap-2 flex-wrap">
         <button class="note-preview-btn bg-slate-200 text-slate-700 px-4 py-2 rounded-lg text-xs font-bold hover:bg-slate-300" data-id="${esc(n.article_id)}"><i class="fas fa-eye mr-1"></i>全文プレビュー</button>
         <button class="note-publish-btn bg-brand-orange text-white px-4 py-2 rounded-lg text-xs font-bold hover:opacity-90" data-id="${esc(n.article_id)}"><i class="fas fa-paper-plane mr-1"></i>公開する</button>
       </div>
     </div>
+    ${published && !n.note_url ? `
+    <div class="mt-3 pt-3 border-t border-slate-100 flex items-center gap-2">
+      <input type="url" class="note-url-input flex-1 border border-slate-200 rounded-lg px-3 py-1.5 text-xs" placeholder="noteで公開したらURLを貼り付け → 枠11の告知が実URL連動になります (https://note.com/...)" data-id="${esc(n.article_id)}">
+      <button class="note-url-save-btn bg-brand-navy text-white px-3 py-1.5 rounded-lg text-xs font-bold" data-id="${esc(n.article_id)}">URL登録</button>
+    </div>` : ''}
   </article>`;
 }
 
@@ -502,10 +511,24 @@ function bindDecisionButtons() {
       if (!confirm('この記事を公開しますか?')) return;
       try {
         await axios.post(`/api/notes/${btn.dataset.id}/publish`);
-        toast('公開処理をキューに投入しました');
+        toast('公開処理をキューに投入しました。noteで公開後、URLを登録してください');
         renderApprove(); updateApprovalBadge();
       } catch (e) {
         toast(e.response?.data?.error || '公開に失敗しました', 'error');
+      }
+    });
+  });
+  document.querySelectorAll('.note-url-save-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const input = document.querySelector(`.note-url-input[data-id="${btn.dataset.id}"]`);
+      const url = (input?.value || '').trim();
+      if (!url) { toast('URLを入力してください', 'error'); return; }
+      try {
+        await axios.post(`/api/notes/${btn.dataset.id}/url`, { note_url: url });
+        toast('note URLを登録しました。明日以降の枠11告知に使われます');
+        renderApprove();
+      } catch (e) {
+        toast(e.response?.data?.error || 'URL登録に失敗しました', 'error');
       }
     });
   });
@@ -562,9 +585,19 @@ async function renderKPI() {
   const { history, summary } = data;
   let analyses = { daily: [], weekly: [] };
   try { analyses = (await axios.get('/api/reports/analysis')).data; } catch (e) {}
+  let settings = {};
+  try { settings = (await axios.get('/api/settings')).data.settings || {}; } catch (e) {}
+  let pubNotes = [];
+  try {
+    const nr = (await axios.get('/api/notes')).data.articles || [];
+    pubNotes = nr.filter((a) => a.approval_status === 'published').slice(0, 8);
+  } catch (e) {}
   const latestDaily = analyses.daily?.[0];
   const latestWeekly = analyses.weekly?.[0];
   const latestMonthly = analyses.monthly?.[0];
+  const latestCompetitor = analyses.competitor?.[0];
+  const todayJst = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+  const latestKpi = history[history.length - 1] || {};
   let weeklyProposals = [];
   try { weeklyProposals = JSON.parse(latestWeekly?.proposals_json || '[]'); } catch (e) {}
 
@@ -584,13 +617,59 @@ async function renderKPI() {
       <canvas id="kpi-chart" height="110"></canvas>
     </div>
 
-    ${latestDaily || latestWeekly || latestMonthly ? `
+    <section id="kpi-input-section" class="bg-white rounded-xl shadow p-4 border-l-4 border-emerald-500">
+      <div class="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <h3 class="font-bold text-sm text-brand-navy"><i class="fas fa-pen-to-square mr-1 text-emerald-600"></i>📊 数値入力(1日2分の収益記録)</h3>
+        <button id="kpi-auto-collect-btn" class="bg-emerald-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:opacity-90"><i class="fas fa-rotate mr-1"></i>自動収集を今実行(X/noteフォロワー)</button>
+      </div>
+      <p class="text-[11px] text-slate-500 mb-3">Xフォロワー・noteフォロワーは毎朝自動収集。以下はAPIで取得できないため手入力です(空欄は上書きしません)</p>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+        <label class="block"><span class="text-slate-500">日付</span><input id="kpi-date" type="date" value="${todayJst}" class="w-full border border-slate-200 rounded-lg px-2 py-1.5 mt-0.5"></label>
+        <label class="block"><span class="text-slate-500">Xインプレッション(累計)</span><input id="kpi-imp" type="number" min="0" placeholder="${latestKpi.x_impressions_total || 0}" class="w-full border border-slate-200 rounded-lg px-2 py-1.5 mt-0.5"></label>
+        <label class="block"><span class="text-slate-500">Xエンゲージメント(累計)</span><input id="kpi-eng" type="number" min="0" placeholder="${latestKpi.x_engagements_total || 0}" class="w-full border border-slate-200 rounded-lg px-2 py-1.5 mt-0.5"></label>
+        <label class="block"><span class="text-slate-500">note売上(本日・円)</span><input id="kpi-sales" type="number" min="0" placeholder="0" class="w-full border border-slate-200 rounded-lg px-2 py-1.5 mt-0.5"></label>
+        <label class="block"><span class="text-slate-500">メンバー数</span><input id="kpi-members" type="number" min="0" placeholder="${latestKpi.membership_count || 0}" class="w-full border border-slate-200 rounded-lg px-2 py-1.5 mt-0.5"></label>
+        <label class="block"><span class="text-slate-500">メンバー収益(月額・円)</span><input id="kpi-mrev" type="number" min="0" placeholder="${latestKpi.membership_revenue || 0}" class="w-full border border-slate-200 rounded-lg px-2 py-1.5 mt-0.5"></label>
+        <label class="block"><span class="text-slate-500">アフィ収益(本日・円)</span><input id="kpi-aff" type="number" min="0" placeholder="0" class="w-full border border-slate-200 rounded-lg px-2 py-1.5 mt-0.5"></label>
+        <div class="flex items-end"><button id="kpi-save-btn" class="w-full bg-brand-navy text-white font-bold rounded-lg px-3 py-1.5"><i class="fas fa-floppy-disk mr-1"></i>保存</button></div>
+      </div>
+      <div class="mt-3 pt-3 border-t border-slate-100 flex items-center gap-2 flex-wrap text-xs">
+        <span class="text-slate-500"><i class="fas fa-gear mr-1"></i>noteユーザー名(自動収集用):</span>
+        <input id="note-username-input" type="text" value="${esc(settings.note_username || '')}" placeholder="例: mune_ai_fukugyo (note.com/○○ の○○部分)" class="border border-slate-200 rounded-lg px-2 py-1.5 w-64">
+        <button id="note-username-save-btn" class="bg-slate-600 text-white font-bold rounded-lg px-3 py-1.5">設定</button>
+        <span class="text-[10px] text-slate-400">設定するとnoteフォロワー数・スキ数を毎朝自動取得します</span>
+      </div>
+    </section>
+
+    ${pubNotes.length ? `
+    <section id="note-sales-section" class="bg-white rounded-xl shadow p-4">
+      <h3 class="font-bold text-sm text-brand-navy mb-1"><i class="fas fa-yen-sign mr-1 text-brand-orange"></i>記事別売上の記録(noteダッシュボードの数字を転記)</h3>
+      <p class="text-[11px] text-slate-500 mb-3">どの記事が売れたかを記録すると、Ruiが「売れる記事の型」を分析して次の企画に反映します</p>
+      <div class="space-y-2">
+        ${pubNotes.map((a) => `
+        <div class="flex items-center gap-2 text-xs flex-wrap border-b border-slate-50 pb-2">
+          <span class="flex-1 min-w-[180px] font-bold truncate" title="${esc(a.title)}">${esc(a.title)}</span>
+          <span class="text-[10px] text-slate-400">${a.type === 'free' ? '無料' : '¥' + a.price_yen}</span>
+          <input type="number" min="0" class="note-stat-view border border-slate-200 rounded px-2 py-1 w-20" placeholder="view ${a.view_count || 0}" data-id="${esc(a.article_id)}">
+          <input type="number" min="0" class="note-stat-sales border border-slate-200 rounded px-2 py-1 w-20" placeholder="売上 ${a.sales_count || 0}件" data-id="${esc(a.article_id)}">
+          <input type="number" min="0" class="note-stat-rev border border-slate-200 rounded px-2 py-1 w-24" placeholder="¥${a.revenue_yen || 0}" data-id="${esc(a.article_id)}">
+          <button class="note-stat-save-btn bg-slate-600 text-white rounded px-2 py-1 font-bold" data-id="${esc(a.article_id)}">保存</button>
+        </div>`).join('')}
+      </div>
+    </section>` : ''}
+
+    ${latestDaily || latestWeekly || latestMonthly || latestCompetitor ? `
     <section id="rui-analysis" class="space-y-4">
       <h2 class="font-bold text-lg text-brand-navy"><span class="text-xl mr-1">📊</span>Ruiの分析レポート</h2>
       ${latestMonthly ? `
       <div class="bg-white rounded-xl shadow p-4 border-l-4 border-purple-500">
         <h3 class="font-bold text-brand-navy mb-2">月次レポート(30日総括+来月戦略) <span class="text-xs text-slate-400 font-normal ml-2">${esc(latestMonthly.report_date)}</span></h3>
         <div class="text-sm whitespace-pre-wrap leading-relaxed text-slate-700 max-h-80 overflow-y-auto">${esc(latestMonthly.body_md)}</div>
+      </div>` : ''}
+      ${latestCompetitor ? `
+      <div class="bg-white rounded-xl shadow p-4 border-l-4 border-sky-500">
+        <h3 class="font-bold text-brand-navy mb-2">Rikoの競合リサーチ(AI副業系noteの売れ筋傾向) <span class="text-xs text-slate-400 font-normal ml-2">${esc(latestCompetitor.report_date)}</span></h3>
+        <div class="text-sm whitespace-pre-wrap leading-relaxed text-slate-700 max-h-72 overflow-y-auto">${esc(latestCompetitor.body_md)}</div>
       </div>` : ''}
       ${latestWeekly ? `
       <div class="bg-white rounded-xl shadow p-4 border-l-4 border-brand-orange">
@@ -636,6 +715,64 @@ async function renderKPI() {
       </table>
     </div>
   </div>`;
+
+  // 数値入力フォームのイベント
+  document.getElementById('kpi-save-btn')?.addEventListener('click', async () => {
+    const val = (id) => { const v = document.getElementById(id)?.value; return v === '' || v === undefined ? undefined : Number(v); };
+    try {
+      await axios.post('/api/kpi/daily', {
+        date: document.getElementById('kpi-date')?.value,
+        x_impressions_total: val('kpi-imp'),
+        x_engagements_total: val('kpi-eng'),
+        note_paid_sales: val('kpi-sales'),
+        membership_count: val('kpi-members'),
+        membership_revenue: val('kpi-mrev'),
+        affiliate_revenue: val('kpi-aff'),
+      });
+      toast('KPIを保存しました');
+      renderKPI();
+    } catch (e) {
+      toast(e.response?.data?.error || 'KPI保存に失敗しました', 'error');
+    }
+  });
+  document.getElementById('kpi-auto-collect-btn')?.addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>収集中...';
+    try {
+      const { data } = await axios.post('/api/kpi/collect');
+      const parts = [];
+      if (data.xFollowers !== undefined) parts.push(`Xフォロワー: ${data.xFollowers}`);
+      if (data.noteFollowers !== undefined) parts.push(`noteフォロワー: ${data.noteFollowers}`);
+      toast(parts.length ? `自動収集完了 — ${parts.join(' / ')}` : (data.errors?.[0] || '取得できる指標がありませんでした'), parts.length ? 'success' : 'error');
+      renderKPI();
+    } catch (e) {
+      toast(e.response?.data?.errors?.[0] || '自動収集に失敗しました', 'error');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-rotate mr-1"></i>自動収集を今実行(X/noteフォロワー)';
+    }
+  });
+  document.getElementById('note-username-save-btn')?.addEventListener('click', async () => {
+    const value = document.getElementById('note-username-input')?.value || '';
+    try {
+      await axios.post('/api/settings', { key: 'note_username', value });
+      toast('noteユーザー名を設定しました。明日から自動収集されます');
+    } catch (e) {
+      toast(e.response?.data?.error || '設定に失敗しました', 'error');
+    }
+  });
+  document.querySelectorAll('.note-stat-save-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const pick = (cls) => { const el = document.querySelector(`.${cls}[data-id="${id}"]`); const v = el?.value; return v === '' || v === undefined ? undefined : Number(v); };
+      try {
+        await axios.post(`/api/notes/${id}/stats`, { view_count: pick('note-stat-view'), sales_count: pick('note-stat-sales'), revenue_yen: pick('note-stat-rev') });
+        toast('記事売上を保存しました');
+      } catch (e) {
+        toast('保存に失敗しました', 'error');
+      }
+    });
+  });
 
   if (kpiChart) { kpiChart.destroy(); kpiChart = null; }
   const ctx = document.getElementById('kpi-chart');

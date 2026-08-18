@@ -102,6 +102,12 @@ export async function runAlexWeeklyPlan(db: D1Database, apiKey: string): Promise
       } catch { /* noop */ }
     }
 
+    // ③.5 Rikoの競合リサーチ(あれば)
+    const comp: any = await db
+      .prepare(`SELECT body_md FROM analysis_reports WHERE report_type = 'competitor' ORDER BY report_date DESC LIMIT 1`)
+      .first()
+    const compText = comp?.body_md ? String(comp.body_md).slice(0, 1500) : '(競合リサーチなし)'
+
     // ③ 直近KPI
     const kpiRows = await db.prepare(`SELECT * FROM kpi_daily ORDER BY date DESC LIMIT 7`).all()
     const kpis = (kpiRows.results || []) as any[]
@@ -120,7 +126,11 @@ ${proposalText}
 ## 直近7日のKPI
 ${kpiText}
 
-※日曜は有料note(500円)の執筆日です。日曜の note_focus は有料記事の企画にしてください。`
+## Rikoの競合リサーチ(AI副業系noteの売れ筋傾向)
+${compText}
+
+※商品ラインナップ: 日曜=有料単発note(100円)の執筆日。土曜=メンバーシップ(月500円)限定記事の執筆日。毎月1日=月次まとめnote(500円・主力商品)。
+日曜の note_focus は有料記事の企画、土曜はメンバー限定の裏話企画にしてください。収益目標: まず0→1の初売上を作ること。`
 
     const llm: LlmResult = await callOpenAI(apiKey, 'gpt-5', ALEX_SYSTEM, userPrompt, 20000, 'high') // 推論(high)トークン込み
     if (!llm.ok) {

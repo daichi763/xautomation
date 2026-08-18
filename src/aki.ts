@@ -128,3 +128,60 @@ export async function runAkiInfographic(
     return result
   }
 }
+
+// ============================================================
+// note記事のカバー画像を生成(Phase D: 画像増産 — note読了率・購入率の向上)
+// 有料記事は購入判断に直結するため必ず、無料記事も毎日生成
+// ============================================================
+export async function runAkiNoteCover(
+  db: D1Database,
+  r2: R2Bucket,
+  apiKey: string,
+  articleId: string,
+  articleTitle: string,
+  articleType: string,
+): Promise<AkiResult> {
+  const result: AkiResult = { ok: false, costUsd: 0 }
+  try {
+    const shortTitle = articleTitle.replace(/[|｜].*$/, '').slice(0, 22)
+    const badge = articleType === 'monthly_summary' ? '月次まとめ' : articleType === 'paid_single' ? '有料検証' : articleType === 'membership' ? 'メンバー限定' : ''
+    const extra = badge ? `small orange badge label "${badge}" in top-left corner` : ''
+
+    const prompt = buildImagePrompt('note_cover', shortTitle, extra)
+    const gen = await generateImage(apiKey, prompt, IMAGE_SIZE.note_cover)
+    if (!gen.ok || !gen.b64) {
+      result.error = `noteカバー生成失敗: ${gen.error}`
+      return result
+    }
+    result.costUsd += IMAGE_COST_USD
+
+    const qa = await qaImage(apiKey, gen.b64, shortTitle)
+    if (qa.ok) result.costUsd += qa.costUsd || 0
+    const verdict = qa.ok ? qa.verdict || 'unknown' : 'unknown'
+    const qaStatus = verdict === 'ok' ? 'ok' : verdict === 'ng' ? 'ng' : 'needs_fix'
+
+    const imageId = `img-cover-${Date.now()}`
+    const r2Key = `images/${imageId}.png`
+    const binary = Uint8Array.from(atob(gen.b64), (ch) => ch.charCodeAt(0))
+    await r2.put(r2Key, binary, { httpMetadata: { contentType: 'image/png' } })
+
+    await db
+      .prepare(
+        `INSERT INTO generated_images (image_id, post_id, purpose, prompt, title_text, r2_key, model, qa_status, qa_issues, cost_usd)
+         VALUES (?, NULL, 'note_cover', ?, ?, ?, 'gpt-image-2', ?, ?, ?)`,
+      )
+      .bind(imageId, prompt, shortTitle, r2Key, qaStatus, JSON.stringify(qa.issues || []), result.costUsd)
+      .run()
+
+    await db.prepare(`UPDATE note_articles SET cover_image_id = ? WHERE article_id = ?`).bind(imageId, articleId).run()
+
+    result.ok = true
+    result.imageId = imageId
+    result.title = shortTitle
+    result.qaStatus = qaStatus
+    return result
+  } catch (e: any) {
+    result.error = e?.message || 'Akiカバー生成エラー'
+    return result
+  }
+}

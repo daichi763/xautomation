@@ -201,7 +201,7 @@ function isQuoteWorthy(t: JaHotTweet): boolean {
 }
 
 // 1キーワード分の検索結果からツイートを抽出
-async function fetchYahooRealtime(keyword: string): Promise<JaHotTweet[]> {
+export async function fetchYahooRealtime(keyword: string): Promise<JaHotTweet[]> {
   const url = `https://search.yahoo.co.jp/realtime/search?p=${encodeURIComponent(keyword)}&md=t`
   const res = await fetchWithTimeout(url, {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
