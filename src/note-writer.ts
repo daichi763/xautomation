@@ -58,11 +58,12 @@ export function todayNoteType(): 'free' | 'paid_single' | 'membership' {
 // アフィリエイトリンクの自動埋め込み(activeのみ)。失敗しても本文は壊さない
 async function autoEmbedAffiliate(db: D1Database, bodyMd: string): Promise<string> {
   try {
-    const { embedAffiliateLinks } = await import('./affiliate')
+    const { embedAffiliateLinks, resolveClickBase } = await import('./affiliate')
     const rows = await db.prepare("SELECT * FROM affiliate_links WHERE status = 'active'").all()
     const links = (rows.results || []) as any[]
     if (!links.length) return bodyMd
-    const r = embedAffiliateLinks(bodyMd, links as any)
+    const clickBase = await resolveClickBase(db) // ③クリック計測URL経由で埋め込む
+    const r = embedAffiliateLinks(bodyMd, links as any, clickBase)
     return r.embedded || bodyMd
   } catch {
     return bodyMd

@@ -24,8 +24,11 @@ export interface EmbedResult {
   changed: boolean
 }
 
-/** 投稿文からツール名を検出し、アフィリンク+PR表記を自動埋め込みする */
-export function embedAffiliateLinks(text: string, links: AffiliateLink[]): EmbedResult {
+/**
+ * 投稿文からツール名を検出し、アフィリンク+PR表記を自動埋め込みする
+ * @param clickBase 指定時はクリック計測用リダイレクトURL(`${clickBase}/go/${link_id}`)を埋め込む(③クリック計測)
+ */
+export function embedAffiliateLinks(text: string, links: AffiliateLink[], clickBase?: string): EmbedResult {
   const detected: EmbedResult['detected'] = []
 
   for (const link of links) {
@@ -34,7 +37,10 @@ export function embedAffiliateLinks(text: string, links: AffiliateLink[]): Embed
     try { aliases = JSON.parse(link.aliases) } catch { aliases = [link.tool_name] }
     const matched = aliases.find((a) => a && text.toLowerCase().includes(a.toLowerCase()))
     if (matched && !text.includes(link.affiliate_url)) {
-      detected.push({ tool_name: link.tool_name, affiliate_url: link.affiliate_url, matched })
+      // クリック計測: clickBase指定時は /go/:link_id 経由URLに置き換え(302で本来のアフィURLへ)
+      const url = clickBase ? `${clickBase.replace(/\/$/, '')}/go/${link.link_id}` : link.affiliate_url
+      if (clickBase && text.includes(url)) continue // 計測URLが既に埋め込まれている場合も重複回避
+      detected.push({ tool_name: link.tool_name, affiliate_url: url, matched })
     }
   }
 
@@ -51,6 +57,18 @@ export function embedAffiliateLinks(text: string, links: AffiliateLink[]): Embed
 
   const embedded = `${text}\n\n${linkLines}${prLine}`
   return { original: text, embedded, detected, pr_added: !hasPr, changed: true }
+}
+
+// クリック計測リダイレクトのベースURL解決
+// app_settings 'app_base_url' があればそれを使用、なければ本番URL固定値
+export const DEFAULT_APP_BASE_URL = 'https://0c9c4d00-0596-4d2b-8bc9-5a2b11a4709d.vip.gensparksite.com'
+
+export async function resolveClickBase(db: D1Database): Promise<string> {
+  try {
+    const row = await db.prepare("SELECT value FROM app_settings WHERE key = 'app_base_url'").first<{ value: string }>()
+    if (row?.value) return String(row.value).replace(/\/$/, '')
+  } catch { /* app_settings未整備でもデフォルトで動く */ }
+  return DEFAULT_APP_BASE_URL
 }
 
 export interface GlossaryEntry {

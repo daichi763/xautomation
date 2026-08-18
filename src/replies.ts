@@ -4,7 +4,7 @@
 //  2. publishApprovedReplies: 承認済み返信を自動送信($0.015/件)
 // X APIキー未設定時は何もしない (エラーにしない)
 
-import { getXCredentials, fetchMyProfile, fetchMyMentions, postTweet, type XCredentials, type XMention } from './x-api'
+import { getXCredentials, fetchMyProfile, fetchMyMentions, postTweet, xWeightedLength, X_WEIGHT_LIMIT, type XCredentials, type XMention } from './x-api'
 import { callOpenAI } from './llm'
 import { runQaCheck } from './qa-rules'
 
@@ -33,7 +33,7 @@ const REPLY_SYSTEM = `あなたは「Sora」— 日本のX(旧Twitter)アカウ�
 - トーン: 誠実・等身大・検証者目線。感謝を伝え、質問には知っている範囲で答える
 
 ## 返信ルール(必須)
-1. 100字以内。1〜2文で簡潔に
+1. 140字以内(日本語Xの1ツイート上限)。1〜3文で、相手の話に具体的に答える
 2. 相手の名前(@〜)は書かない(返信機能で自動表示されるため)
 3. 質問に答えられない場合は「検証してみます」「調べて発信しますね」と誠実に返す
 4. 絵文字は1個まで。ハッシュタグ・URLは書かない
@@ -105,11 +105,17 @@ export async function collectMentionsAndDraft(
   const mentions = res.mentions || []
   result.fetched = mentions.length
 
-  if (res.newestId) {
-    await db.prepare("INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('x_mentions_since_id', ?, CURRENT_TIMESTAMP)")
-      .bind(res.newestId).run()
+  // 注意: since_idは全件の下書き処理が終わった後に更新する。
+  // 途中でLLM障害等が起きても、未処理メンションは次回再取得される(取りこぼし防止)。
+  // 処理済み分は x_replies の UNIQUE(mention_tweet_id) + 事前チェックで重複しない。
+  if (mentions.length === 0) {
+    if (res.newestId) {
+      await db.prepare("INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('x_mentions_since_id', ?, CURRENT_TIMESTAMP)")
+        .bind(res.newestId).run()
+    }
+    return result
   }
-  if (mentions.length === 0) return result
+  let allProcessed = true
 
   for (const m of mentions) {
     try {
@@ -126,9 +132,10 @@ export async function collectMentionsAndDraft(
       result.costUsd += llm.costUsd || 0
       if (!llm.ok || !llm.content) {
         result.errors.push(`下書き生成失敗(${m.tweetId}): ${llm.error}`)
+        allProcessed = false // 未保存のまま残すので since_id を進めない → 次回再取得
         continue
       }
-      const draft = llm.content.trim()
+      let draft = llm.content.trim()
       if (draft === 'SKIP' || draft.startsWith('SKIP')) {
         // スパム等: rejected として記録し再処理を防ぐ
         await db.prepare(
@@ -138,8 +145,24 @@ export async function collectMentionsAndDraft(
         continue
       }
 
-      // Mio QA (静的ルール)
+      // 文字数ガード: weighted 280(日本語約140字)超は送信時に必ず失敗するため、一度だけ短縮リトライ
+      if (xWeightedLength(draft) > X_WEIGHT_LIMIT) {
+        const shorten = await callOpenAI(apiKey, 'gpt-5-mini', REPLY_SYSTEM,
+          `以下の返信案は長すぎます。意味を保ったまま120字以内に短縮してください。出力は短縮後の本文のみ。\n\n${draft}`,
+          2000, 'low')
+        result.costUsd += shorten.costUsd || 0
+        if (shorten.ok && shorten.content && xWeightedLength(shorten.content.trim()) <= X_WEIGHT_LIMIT) {
+          draft = shorten.content.trim()
+        }
+      }
+      const overLimit = xWeightedLength(draft) > X_WEIGHT_LIMIT
+
+      // Mio QA (静的ルール) — 文字数超過は needs_fix に格下げ(承認前に取締役が気づける)
       const qa = runQaCheck(draft, false)
+      if (overLimit && qa.status === 'ok') {
+        qa.status = 'needs_fix'
+        qa.issues.push({ law: '文字数', matched: `${xWeightedLength(draft)}/280`, detail: 'Xの文字数上限(weighted 280)を超えています。短縮が必要です' } as any)
+      }
       await db.prepare(
         `INSERT OR IGNORE INTO x_replies (reply_id, mention_tweet_id, mention_author, mention_author_id, mention_text, draft_body, qa_status, qa_issues, approval_status, cost_usd)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
@@ -156,8 +179,15 @@ export async function collectMentionsAndDraft(
       ).run()
       result.drafted++
     } catch (e: any) {
+      allProcessed = false
       result.errors.push(`${m.tweetId}: ${e?.message || 'error'}`)
     }
+  }
+
+  // 全件処理できた場合のみ since_id を進める(失敗分は次回再取得、処理済み分は重複チェックで弾く)
+  if (allProcessed && res.newestId) {
+    await db.prepare("INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('x_mentions_since_id', ?, CURRENT_TIMESTAMP)")
+      .bind(res.newestId).run()
   }
 
   return result

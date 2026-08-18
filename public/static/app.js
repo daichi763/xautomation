@@ -15,6 +15,18 @@ const GATE_JA = { weekly_planning: '週次企画', daily_posts: '日次投稿', 
 const SLOT_NAMES = ['', '朝のニュース速報', '1日の予告', 'ノウハウ図解', 'バズ狙いスレッド', '昼休みTips', '引用RT', 'ケーススタディ分解', 'ツール比較・アフィ', '質問投げかけ', '実践報告・失敗談', 'note告知', '深夜の一言'];
 const SLOT_TIMES = ['', '06:30', '07:30', '09:00', '11:00', '12:15', '14:00', '16:00', '18:00', '19:30', '21:00', '22:30', '23:30'];
 
+// 実際の予約時刻(scheduled_atはUTC保存)をJST表示。P1-5の時間最適化でデフォルトとずれても正しく出る
+ function slotTimeLabel(p) {
+  if (p && p.scheduled_at) {
+    const d = new Date(p.scheduled_at.replace(' ', 'T') + 'Z');
+    if (!isNaN(d.getTime())) {
+      const j = new Date(d.getTime() + 9 * 3600 * 1000);
+      return `${String(j.getUTCHours()).padStart(2, '0')}:${String(j.getUTCMinutes()).padStart(2, '0')}`;
+    }
+  }
+  return SLOT_TIMES[p?.slot_number] || '';
+}
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 }
@@ -34,7 +46,7 @@ function setNav(view) {
 async function updateApprovalBadge() {
   try {
     const { data } = await axios.get('/api/office');
-    const total = (data.pending_approvals || []).reduce((s, r) => s + r.cnt, 0);
+    const total = (data.pending_approvals || []).reduce((s, r) => s + r.cnt, 0) + (data.pending_replies || 0);
     const badge = document.getElementById('approval-badge');
     if (total > 0) { badge.textContent = total; badge.classList.remove('hidden'); }
     else badge.classList.add('hidden');
@@ -44,7 +56,7 @@ async function updateApprovalBadge() {
 /* ============ オフィスビュー ============ */
 async function renderOffice() {
   const { data } = await axios.get('/api/office');
-  const { workers, tasks, kpi_today, kpi_yesterday, pending_approvals, recent_logs, note_session } = data;
+  const { workers, tasks, kpi_today, kpi_yesterday, pending_approvals, pending_replies, recent_logs, note_session } = data;
   let nanaReport = null;
   let weekPlan = null;
   try { nanaReport = (await axios.get('/api/reports/daily')).data.reports?.[0] || null; } catch (e) {}
@@ -53,7 +65,7 @@ async function renderOffice() {
   const followerDelta = kpi_today && kpi_yesterday ? kpi_today.x_followers - kpi_yesterday.x_followers : 0;
   const revenueToday = kpi_today ? (kpi_today.note_paid_sales || 0) + (kpi_today.affiliate_revenue || 0) : 0;
 
-  const pendingTotal = (pending_approvals || []).reduce((s, r) => s + r.cnt, 0);
+  const pendingTotal = (pending_approvals || []).reduce((s, r) => s + r.cnt, 0) + (pending_replies || 0);
 
   $app.innerHTML = `
   <div class="fade-in space-y-6">
@@ -74,7 +86,7 @@ async function renderOffice() {
         <i class="fas fa-bell text-brand-orange text-xl"></i>
         <div>
           <p class="font-bold text-brand-navy">承認待ちが ${pendingTotal} 件あります</p>
-          <p class="text-xs text-slate-500">${(pending_approvals || []).map((r) => `${GATE_JA[r.gate_type] || r.gate_type}: ${r.cnt}件`).join(' / ')}</p>
+          <p class="text-xs text-slate-500">${[...(pending_approvals || []).map((r) => `${GATE_JA[r.gate_type] || r.gate_type}: ${r.cnt}件`), ...(pending_replies ? [`リプライ返信: ${pending_replies}件`] : [])].join(' / ')}</p>
         </div>
       </div>
       <button onclick="navigate('approve')" class="bg-brand-orange text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90">承認画面へ</button>
@@ -289,7 +301,7 @@ async function renderApprove() {
       ${approvedPosts.length ? `<div class="grid md:grid-cols-2 gap-3">${approvedPosts.map((p) => `
       <article class="bg-white rounded-xl shadow p-4 flex flex-col gap-2">
         <div class="flex items-center justify-between">
-          <span class="text-xs font-bold text-brand-navy bg-slate-100 px-2 py-1 rounded">枠${p.slot_number} ${SLOT_TIMES[p.slot_number]}</span>
+          <span class="text-xs font-bold text-brand-navy bg-slate-100 px-2 py-1 rounded">枠${p.slot_number} ${slotTimeLabel(p)}</span>
           ${qaBadge(p.qa_status, p.qa_issues)}
         </div>
         <p class="text-sm whitespace-pre-wrap leading-relaxed flex-1">${esc(p.body)}</p>
@@ -317,9 +329,13 @@ async function renderApprove() {
           <tbody>${cronStatus.recentRuns.map((r) => {
             let d = {}; try { d = JSON.parse(r.output_json || '{}'); } catch (e) {}
             const WORKER_JA = { alex: 'Alex', riko: 'Riko', kai: 'Kai', yuto: 'Yuto', aki: 'Aki', sora: 'Sora', rui: 'Rui', nana: 'Nana', mio: 'Mio' };
-            const ACTION_JA = { weekly_plan: '週次計画', auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: 'X執筆', auto_note: 'note執筆', auto_qa: 'QA審査', auto_infographic: '図解生成', daily_analysis: '日次分析', weekly_analysis: '週次分析', monthly_analysis: '月次分析', daily_report: '日次レポート', quote_crawl: '話題ツイート収集', auto_publish: '自動投稿', x_publish: 'X投稿(手動)', kpi_collect: 'KPI自動収集', competitor_research: '競合リサーチ', monthly_note: '月次まとめnote', note_cover: 'noteカバー画像', mention_collect: 'メンション回収', reply_publish: 'リプライ返信', slot_optimize: '投稿時間最適化', post_recycle: '投稿リサイクル' };
+            const ACTION_JA = { weekly_plan: '週次計画', auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: 'X執筆', auto_note: 'note執筆', auto_qa: 'QA審査', auto_infographic: '図解生成', daily_analysis: '日次分析', weekly_analysis: '週次分析', monthly_analysis: '月次分析', daily_report: '日次レポート', quote_crawl: '話題ツイート収集', auto_publish: '自動投稿', x_publish: 'X投稿(手動)', kpi_collect: 'KPI自動収集', competitor_research: '競合リサーチ', monthly_note: '月次まとめnote', note_cover: 'noteカバー画像', mention_collect: 'メンション回収', reply_publish: 'リプライ返信', slot_optimize: '投稿時間最適化', post_recycle: '投稿リサイクル', self_repost: 'セルフRT' };
             let detail = '';
-            if (r.worker_name === 'riko') detail = `収集${d.collected ?? '-'}件 → ネタ${d.inserted ?? '-'}件投入${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            if (r.action === 'mention_collect') detail = `メンション${d.fetched ?? 0}件 → 返信案${d.drafted ?? 0}件生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.action === 'slot_optimize') detail = `実績${d.analyzed ?? 0}投稿を分析${d.changes?.length ? ` 変更: ${d.changes.join(' / ').slice(0, 60)}` : '(変更なし)'}`;
+            else if (r.action === 'post_recycle') detail = `インプ${d.sourceImpressions ?? '-'}の投稿をリライト${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
+            else if (r.action === 'self_repost') detail = `インプ${d.impressions ?? '-'}の投稿をセルフRT`;
+            else if (r.worker_name === 'riko') detail = `収集${d.collected ?? '-'}件 → ネタ${d.inserted ?? '-'}件投入${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.worker_name === 'kai') detail = `翻訳${d.translated ?? '-'}本${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.worker_name === 'mio') detail = `審査${d.checked ?? '-'}本(OK ${d.ok ?? 0} / 要修正 ${d.needsFix ?? 0} / NG ${d.ng ?? 0})`;
             else if (r.worker_name === 'alex') detail = `テーマ:${d.theme ? esc(d.theme).slice(0, 30) : '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
@@ -329,9 +345,6 @@ async function renderApprove() {
             else if (r.worker_name === 'nana') detail = `承認待ち${d.pending ?? '-'}件 / 滞留${d.stale ?? 0}件${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.action === 'auto_note') detail = `note「${d.title ? esc(d.title).slice(0, 25) : '-'}」(${d.type === 'paid_single' ? '有料¥100' : d.type === 'membership' ? 'メンバー限定' : '無料'}) QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.action === 'monthly_note') detail = `月次まとめ「${d.title ? esc(d.title).slice(0, 25) : '-'}」(¥500) QA:${d.qaStatus || '-'}${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
-            else if (r.action === 'mention_collect') detail = `メンション${d.fetched ?? 0}件 → 返信案${d.drafted ?? 0}件生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
-            else if (r.action === 'slot_optimize') detail = `実績${d.analyzed ?? 0}投稿を分析${d.changes?.length ? ` 変更: ${d.changes.join(' / ').slice(0, 60)}` : '(変更なし)'}`;
-            else if (r.action === 'post_recycle') detail = `インプ${d.sourceImpressions ?? '-'}の投稿をリライト${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else detail = `投稿${d.postsCreated ?? '-'}本生成${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             return `<tr class="border-b border-slate-50"><td class="py-1 pr-3 text-slate-500">${esc((r.finished_at || '').slice(5, 16))}</td><td class="py-1 pr-3 font-bold">${WORKER_JA[r.worker_name] || r.worker_name}</td><td class="py-1 pr-3">${ACTION_JA[r.action] || r.action}</td><td class="py-1 pr-3">${r.status === 'success' ? '<span class="text-emerald-600">成功</span>' : '<span class="text-red-500">失敗</span>'}</td><td class="py-1 text-slate-500">${esc(detail)}</td></tr>`;
           }).join('')}</tbody>
@@ -456,7 +469,7 @@ function postCard(p) {
   return `
   <article class="post-card bg-white rounded-xl shadow p-4 flex flex-col gap-2">
     <div class="flex items-center justify-between">
-      <span class="text-xs font-bold text-brand-navy bg-slate-100 px-2 py-1 rounded">枠${p.slot_number} ${SLOT_TIMES[p.slot_number]} ${esc(SLOT_NAMES[p.slot_number])}</span>
+      <span class="text-xs font-bold text-brand-navy bg-slate-100 px-2 py-1 rounded">枠${p.slot_number} ${slotTimeLabel(p)} ${esc(SLOT_NAMES[p.slot_number])}${p.recycled_from ? ' ♻️リサイクル' : ''}</span>
       ${qaBadge(p.qa_status, p.qa_issues)}
     </div>
     <p class="text-sm whitespace-pre-wrap leading-relaxed flex-1">${esc(p.body)}</p>
@@ -1113,8 +1126,10 @@ async function renderAffiliate() {
               <span class="font-bold text-sm">${esc(l.tool_name)}</span>
               <span class="text-[10px] px-2 py-0.5 rounded-full font-bold ${l.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}">${l.status === 'active' ? '自動埋め込み中' : '停止中'}</span>
               ${l.program ? `<span class="text-[10px] text-slate-400">${esc(l.program)}</span>` : ''}
+              <span class="text-[10px] px-2 py-0.5 rounded-full font-bold bg-sky-100 text-sky-700"><i class="fas fa-arrow-pointer mr-0.5"></i>クリック ${l.clicks_7d ?? 0}/7日 (累計${l.clicks_total ?? 0})</span>
             </div>
             <div class="text-xs text-slate-500 truncate max-w-md">${esc(l.affiliate_url)}</div>
+            <div class="text-[11px] text-sky-600 truncate max-w-md">計測URL: /go/${esc(l.link_id)}</div>
             ${l.note ? `<div class="text-[11px] text-amber-600">${esc(l.note)}</div>` : ''}
           </div>
           <div class="flex gap-2">

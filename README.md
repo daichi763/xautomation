@@ -41,6 +41,7 @@
 | GET | `/api/replies?status=pending` | リプライ返信下書き一覧(ゲート②) |
 | POST | `/api/replies/:id/decision` | 返信の承認/却下 `{decision, body?}`(承認時に本文編集可) |
 | POST | `/api/replies/approve-all` | QA通過の返信を一括承認 |
+| GET | `/go/:link_id` | アフィリンククリック計測リダイレクト(公開・認証不要。記録→実アフィURLへ302) |
 | GET | `/api/notes` / `/api/notes/:id` | note記事一覧/全文(ゲート③) |
 | POST | `/api/notes/:id/publish` | note公開(QA=NGは拒否) |
 | GET | `/api/kpi?days=14` | KPI履歴+サマリ |
@@ -74,7 +75,7 @@
 
 ## データアーキテクチャ
 - **ストレージ**: Cloudflare D1(ローカルは `--local` SQLite) + R2(生成画像の保存)
-- **テーブル**: `worker_status` / `worker_logs` / `topic_candidates` / `x_posts`(recycled_from列でリサイクル追跡) / `note_articles`(note_url・cover_image_id列含む) / `kpi_daily` / `approval_queue` / `task_queue` / `affiliate_links` / `glossary` / `generated_images` / `daily_reports`(Nana) / `analysis_reports`(Rui・競合リサーチ含む) / `weekly_plans`(Alex) / `auth_users` / `auth_sessions` / `app_settings` / `x_replies`(リプライ返信)
+- **テーブル**: `worker_status` / `worker_logs` / `topic_candidates` / `x_posts`(recycled_from列でリサイクル追跡) / `note_articles`(note_url・cover_image_id列含む) / `kpi_daily` / `approval_queue` / `task_queue` / `affiliate_links` / `glossary` / `generated_images` / `daily_reports`(Nana) / `analysis_reports`(Rui・競合リサーチ含む) / `weekly_plans`(Alex) / `auth_users` / `auth_sessions` / `app_settings` / `x_replies`(リプライ返信) / `affiliate_clicks`(クリック計測。x_posts.self_reposted_atでセルフRT追跡)
 - **KPI収集の仕組み(ほぼ全自動)**:
   - 自動(X API従量課金 — 月$1.5程度): Xフォロワー数(`/2/users/me` $0.01/回)、Xインプレ/エンゲージメント(`/2/users/{id}/tweets` Owned Read $0.001/件・直近20投稿)
   - 自動(note公開API — 無料): noteフォロワー数・スキ累計(KPI画面でnoteユーザー名を設定すると有効化)
@@ -162,6 +163,9 @@
 10. **リプライ自動返信(P1-4)**: JST 8/12/18/22時にメンションを自動回収($0.001/件・since_id差分取得)→Soraが返信案を生成(gpt-5-mini・スパムはSKIP判定)→Mio QA→ゲート②の「リプライ返信の承認」で承認→毎時cronが自動送信($0.015/件)。キー未登録時は安全にスキップ
 11. **投稿時間最適化(P1-5)**: 毎週月曜に直近60日の投稿別実績から枠ごとのベスト時間帯を再計算(デフォルト±2時間内・3投稿以上・10%以上改善の時のみ採用)し、以降の予約時刻に自動反映。実績がない間はデフォルトのまま
 12. **高実績投稿リサイクル(P1-6)**: 14日以上前に公開したインプ上位投稿を1日1本、Yutoが新しい切り口でリライトしてゲート②へ(同じ元投稿は1度だけ・引用RT/note告知は対象外)
+13. **アフィリンククリック計測**: 自動埋込されるアフィリンクは `/go/:link_id` 経由の計測URLになり、読者が踏むとクリックを記録して実アフィURLへ302リダイレクト。設定画面のリンク一覧に7日/累計クリック数を表示、Ruiの分析にもツール別クリック数が入る(「どの投稿が収益に近づいたか」が見える)
+14. **セルフリポスト**: 毎日JST 21時に当日公開済みインプ最上位の投稿を1本自動RT(夜の別オーディエンスに再露出)。同じ投稿は二度とRTしない・1日1本・Xキー未登録なら何もしない
+15. **返信承認待ちの可視化**: ヘッダーの承認バッジ・オフィスの承認待ちアラート・Nana日次レポートにリプライ返信の承認待ち件数も含まれる(24時間滞留リマインド対象)
 9. **note公開(ゲート③)**: 承認画面で「全文プレビュー」→有料記事はオレンジの破線が有料化ライン。「Markdownをコピー」→noteエディタに貼付→価格(単発¥100/月次まとめ¥500)と有料ラインを設定して公開→アプリの「公開する」ボタンで記録→**公開後にnoteの実URLを登録**(翌日以降の枠11が実URL付き宣伝に切替わる)
 10. **KPI入力ルーティン(1日2分)**: KPI画面で ①初回のみnoteユーザー名を設定(自動収集が有効化) ②毎日: Xアナリティクスのインプレとnoteダッシュボードの売上・メンバー数を転記して保存 ③売れた記事は「記事別売上」にも入力(Ruiの分析精度が上がる)
 8. **初回ログイン**: 許可メールアドレスと新しいパスワード(8文字以上)で初回登録。2回目以降は同じメール+パスワードでログイン(30日間有効)

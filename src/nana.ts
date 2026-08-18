@@ -64,6 +64,18 @@ export async function runNanaReport(db: D1Database, apiKey: string): Promise<Nan
       .prepare(`SELECT COUNT(*) AS c FROM topic_candidates WHERE status = 'pending'`)
       .first()
 
+    // ⑤' 返信承認待ち(ゲート②' リプライ自動返信) — テーブル未整備の環境でも落ちない
+    let replyStats: any = null
+    try {
+      replyStats = await db
+        .prepare(
+          `SELECT COUNT(*) AS pending,
+             SUM(CASE WHEN created_at < datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS stale
+           FROM x_replies WHERE approval_status = 'pending' AND draft_body != ''`,
+        )
+        .first()
+    } catch { /* x_replies未整備 */ }
+
     // ⑤ 明日の予定(承認済み・投稿予定)
     const tomorrowPlan: any = await db
       .prepare(
@@ -75,12 +87,15 @@ export async function runNanaReport(db: D1Database, apiKey: string): Promise<Nan
     const pendingNotes = Number(noteStats?.pending_notes || 0)
     const stalePosts = Number(postStats?.stale_posts || 0)
     const staleNotes = Number(noteStats?.stale_notes || 0)
-    result.pendingCount = pendingPosts + pendingNotes
-    result.stalePending = stalePosts + staleNotes
+    const pendingReplies = Number(replyStats?.pending || 0)
+    const staleReplies = Number(replyStats?.stale || 0)
+    result.pendingCount = pendingPosts + pendingNotes + pendingReplies
+    result.stalePending = stalePosts + staleNotes + staleReplies
 
     const facts = `## 本日(${today})の事実データ
 - X投稿: 本日公開 ${postStats?.published_today || 0}件 / 承認待ち ${pendingPosts}件(うち24時間以上滞留 ${stalePosts}件) / 承認済み未投稿 ${postStats?.approved_unpublished || 0}件
 - note: 承認待ち(ゲート③) ${pendingNotes}件(うち24時間以上滞留 ${staleNotes}件) / 累計売上 ${noteStats?.total_sales || 0}件・${noteStats?.total_revenue || 0}円
+- リプライ返信: 承認待ち ${pendingReplies}件(うち24時間以上滞留 ${staleReplies}件)
 - 最新KPI(${kpi?.date || 'データなし'}): フォロワー ${kpi?.x_followers ?? '—'} / インプレッション ${kpi?.x_impressions_total ?? '—'} / note販売 ${kpi?.note_paid_sales ?? '—'}
 - ゲート①承認待ちネタ: ${topicPending?.c || 0}件
 - 明日以降の投稿予定: ${tomorrowPlan?.c || 0}件

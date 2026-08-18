@@ -13,10 +13,11 @@ import { runNanaReport } from './nana'
 import { collectJaHotTweets, type JaHotTweet } from './sources'
 import { runSoraScheduledPublish, type SoraPublishResult } from './sora'
 import { collectKpiAuto } from './kpi-collector'
-import { embedAffiliateLinks, type AffiliateLink } from './affiliate'
+import { embedAffiliateLinks, resolveClickBase, type AffiliateLink } from './affiliate'
 import { collectMentionsAndDraft, publishApprovedReplies, type ReplyCollectResult, type ReplyPublishResult } from './replies'
 import { runSlotOptimize, loadSlotOverrides } from './slot-optimizer'
 import { runPostRecycle } from './recycle'
+import { getXCredentials, retweet, fetchMyProfile } from './x-api'
 
 // 指示書§05 12枠タイムテーブル
 export const SLOT_TABLE: { slot: number; time: string; type: string; limit: string }[] = [
@@ -338,7 +339,8 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
     // リンク0件・ツール名不一致なら何も変えずそのまま(未登録でも正常動作)
     if (slotDef.slot === 8 && affiliateLinks.length > 0) {
       try {
-        const emb = embedAffiliateLinks(body, affiliateLinks)
+        const clickBase = await resolveClickBase(db) // ③クリック計測: /go/:link_id 経由URLを埋め込む
+        const emb = embedAffiliateLinks(body, affiliateLinks, clickBase)
         if (emb.changed) {
           body = emb.embedded
           await logWorker(db, 'sora', 'affiliate_embed', true, { slot: 8, tools: emb.detected.map((d) => d.tool_name), pr_added: emb.pr_added })
@@ -528,7 +530,86 @@ export interface HourlyTickResult {
   pipeline?: PipelineResult
   sora: SoraPublishResult
   replies: { collect: ReplyCollectResult; publish: ReplyPublishResult }
+  selfRepost?: SelfRepostResult
   error?: string
+}
+
+// ④ セルフリポスト: 当日公開済みのインプ上位1本を夜(JST21時)に自動RTして再露出
+// - 1日1本 / 同じ投稿は二度とRTしない(self_reposted_atで追跡)
+// - Xキー未設定なら何もしない(skippedNoCreds)
+export interface SelfRepostResult {
+  ok: boolean
+  reposted: boolean
+  skippedNoCreds: boolean
+  postId?: string
+  tweetId?: string
+  impressions?: number
+  error?: string
+}
+
+export async function runSelfRepost(
+  db: D1Database,
+  env: Record<string, string | undefined>,
+): Promise<SelfRepostResult> {
+  const result: SelfRepostResult = { ok: true, reposted: false, skippedNoCreds: false }
+  const creds = getXCredentials(env)
+  if (!creds) {
+    result.skippedNoCreds = true
+    return result
+  }
+  try {
+    // 1日1本ガード: 今日(JST)既にRT済みならスキップ
+    const already = await db
+      .prepare("SELECT post_id FROM x_posts WHERE self_reposted_at IS NOT NULL AND date(self_reposted_at, '+9 hours') = date('now', '+9 hours') LIMIT 1")
+      .first()
+    if (already) return result
+
+    // 当日(JST)公開済み・未RT・tweet_idありのインプ最上位1本
+    const top: any = await db
+      .prepare(
+        `SELECT post_id, buffer_id, impressions FROM x_posts
+         WHERE published_at IS NOT NULL AND buffer_id IS NOT NULL
+           AND self_reposted_at IS NULL
+           AND date(published_at, '+9 hours') = date('now', '+9 hours')
+         ORDER BY impressions DESC, published_at ASC LIMIT 1`,
+      )
+      .first()
+    if (!top?.buffer_id) return result // 当日の公開済み投稿なし
+
+    // userIdはapp_settingsキャッシュ優先(User Read $0.010節約)
+    let userId = ''
+    try {
+      const cached: any = await db.prepare("SELECT value FROM app_settings WHERE key = 'x_user_id'").first()
+      if (cached?.value) userId = JSON.parse(cached.value).userId || ''
+    } catch { /* なければ取得 */ }
+    if (!userId) {
+      const prof = await fetchMyProfile(creds)
+      if (!prof.ok || !prof.userId) {
+        result.ok = false
+        result.error = `プロフィール取得失敗: ${prof.error}`
+        return result
+      }
+      userId = prof.userId
+      await db.prepare("INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('x_user_id', ?, CURRENT_TIMESTAMP)")
+        .bind(JSON.stringify({ userId, username: prof.username || '' })).run()
+    }
+
+    const rt = await retweet(creds, userId, String(top.buffer_id))
+    if (!rt.ok) {
+      result.ok = false
+      result.error = rt.error
+      return result
+    }
+    await db.prepare("UPDATE x_posts SET self_reposted_at = datetime('now') WHERE post_id = ?").bind(top.post_id).run()
+    result.reposted = true
+    result.postId = String(top.post_id)
+    result.tweetId = String(top.buffer_id)
+    result.impressions = Number(top.impressions || 0)
+  } catch (e: any) {
+    result.ok = false
+    result.error = e?.message || 'セルフリポストエラー'
+  }
+  return result
 }
 
 export async function runHourlyTick(
@@ -590,6 +671,24 @@ export async function runHourlyTick(
     result.replies.publish = await publishApprovedReplies(db, env)
   } catch (e: any) {
     result.replies.publish.errors.push(e?.message || '返信送信エラー')
+  }
+
+  // ④ JST 21時: 当日インプ上位投稿をセルフRT(夜の再露出でインプ上乗せ。Xキー未設定なら何もしない)
+  try {
+    if (jstHour === 21) {
+      result.selfRepost = await runSelfRepost(db, env)
+      if (!result.selfRepost.skippedNoCreds && (result.selfRepost.reposted || result.selfRepost.error)) {
+        await logWorker(db, 'sora', 'self_repost', result.selfRepost.ok, {
+          reposted: result.selfRepost.reposted,
+          postId: result.selfRepost.postId,
+          tweetId: result.selfRepost.tweetId,
+          impressions: result.selfRepost.impressions,
+          error: result.selfRepost.error,
+        })
+      }
+    }
+  } catch (e: any) {
+    result.selfRepost = { ok: false, reposted: false, skippedNoCreds: false, error: e?.message || 'セルフリポストエラー' }
   }
 
   return result

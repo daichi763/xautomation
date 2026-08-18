@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { runQaCheck, FORBIDDEN_RULES } from './qa-rules'
-import { embedAffiliateLinks, suggestAnnotations, type AffiliateLink, type GlossaryEntry } from './affiliate'
+import { embedAffiliateLinks, resolveClickBase, suggestAnnotations, type AffiliateLink, type GlossaryEntry } from './affiliate'
 import { computeCostPlan } from './model-plan'
 import { callOpenAI, YUTO_SYSTEM, MIO_SYSTEM } from './llm'
 import { buildImagePrompt, generateImage, qaImage, IMAGE_SIZE, IMAGE_COST_USD, type ImagePurpose } from './image-gen'
@@ -80,13 +80,15 @@ app.post('/api/auth/logout', async (c) => {
 // オフィス全体の状態(ワーカー + 承認待ち件数 + 本日KPI)
 app.get('/api/office', async (c) => {
   const { DB } = c.env
-  const [workers, tasks, kpi, pendingApprovals, recentLogs, sessionStatus] = await Promise.all([
+  const [workers, tasks, kpi, pendingApprovals, recentLogs, sessionStatus, pendingReplies] = await Promise.all([
     DB.prepare('SELECT * FROM worker_status ORDER BY rowid').all(),
     DB.prepare("SELECT * FROM task_queue WHERE status IN ('queued','processing') ORDER BY priority LIMIT 20").all(),
     DB.prepare("SELECT * FROM kpi_daily ORDER BY date DESC LIMIT 2").all(),
     DB.prepare("SELECT gate_type, COUNT(*) as cnt FROM approval_queue WHERE responded_at IS NULL GROUP BY gate_type").all(),
     DB.prepare('SELECT * FROM worker_logs ORDER BY started_at DESC LIMIT 10').all(),
-    DB.prepare("SELECT key, value FROM app_settings WHERE key IN ('note_session_status','note_session_checked_at')").all()
+    DB.prepare("SELECT key, value FROM app_settings WHERE key IN ('note_session_status','note_session_checked_at')").all(),
+    // ⑤ 返信承認待ち件数(x_replies未整備でも落とさない)
+    DB.prepare("SELECT COUNT(*) AS cnt FROM x_replies WHERE approval_status = 'pending' AND draft_body != ''").first<{ cnt: number }>().catch(() => ({ cnt: 0 }))
   ])
   const ss: Record<string, string> = {}
   for (const r of (sessionStatus.results || []) as any[]) ss[r.key] = r.value
@@ -96,6 +98,7 @@ app.get('/api/office', async (c) => {
     kpi_today: kpi.results?.[0] ?? null,
     kpi_yesterday: kpi.results?.[1] ?? null,
     pending_approvals: pendingApprovals.results,
+    pending_replies: Number((pendingReplies as any)?.cnt || 0),
     recent_logs: recentLogs.results,
     note_session: { status: ss['note_session_status'] || 'unset', checked_at: ss['note_session_checked_at'] || null }
   })
@@ -664,10 +667,15 @@ app.get('/api/qa/rules', (c) => c.json(FORBIDDEN_RULES))
 // アフィリエイトリンク管理 + 自動埋め込み
 // ============================================================
 
-// 登録済みリンク一覧
+// 登録済みリンク一覧(③: クリック数付き)
 app.get('/api/affiliate/links', async (c) => {
   const { DB } = c.env
-  const rows = await DB.prepare('SELECT * FROM affiliate_links ORDER BY created_at DESC').all()
+  const rows = await DB.prepare(
+    `SELECT l.*,
+       (SELECT COUNT(*) FROM affiliate_clicks c WHERE c.link_id = l.link_id) AS clicks_total,
+       (SELECT COUNT(*) FROM affiliate_clicks c WHERE c.link_id = l.link_id AND c.clicked_at > datetime('now', '-7 days')) AS clicks_7d
+     FROM affiliate_links l ORDER BY l.created_at DESC`
+  ).all().catch(async () => DB.prepare('SELECT * FROM affiliate_links ORDER BY created_at DESC').all())
   return c.json({ links: rows.results })
 })
 
@@ -702,7 +710,7 @@ app.post('/api/affiliate/embed', async (c) => {
   const { text } = await c.req.json<{ text: string }>()
   if (!text) return c.json({ error: 'text is required' }, 400)
   const links = (await DB.prepare('SELECT * FROM affiliate_links').all()).results as unknown as AffiliateLink[]
-  const result = embedAffiliateLinks(text, links)
+  const result = embedAffiliateLinks(text, links, await resolveClickBase(DB))
   return c.json(result)
 })
 
@@ -713,13 +721,30 @@ app.post('/api/posts/:id/embed-affiliate', async (c) => {
   const post = await DB.prepare('SELECT * FROM x_posts WHERE post_id = ?').bind(id).first<any>()
   if (!post) return c.notFound()
   const links = (await DB.prepare('SELECT * FROM affiliate_links').all()).results as unknown as AffiliateLink[]
-  const result = embedAffiliateLinks(post.body, links)
+  const result = embedAffiliateLinks(post.body, links, await resolveClickBase(DB))
   if (!result.changed) return c.json({ ok: false, message: '埋め込み対象のツール名が見つかりませんでした', result })
   // 埋め込み後に再QA(PR表記が付くので needs_fix が解消されるケースあり)
   const qa = runQaCheck(result.embedded, true)
   await DB.prepare('UPDATE x_posts SET body = ?, qa_status = ?, qa_issues = ? WHERE post_id = ?')
     .bind(result.embedded, qa.status, JSON.stringify(qa.issues), id).run()
   return c.json({ ok: true, result, qa })
+})
+
+// ③ クリック計測リダイレクト(公開エンドポイント — 読者がアフィリンクを踏む入口)
+// /go/:link_id → affiliate_clicks に記録 → 本来のアフィURLへ302
+app.get('/go/:link_id', async (c) => {
+  const { DB } = c.env
+  const linkId = c.req.param('link_id')
+  const link = await DB.prepare('SELECT affiliate_url FROM affiliate_links WHERE link_id = ?')
+    .bind(linkId).first<{ affiliate_url: string }>()
+  if (!link?.affiliate_url) return c.text('Not Found', 404)
+  // 記録失敗でもリダイレクトは必ず行う(読者体験優先)
+  try {
+    await DB.prepare('INSERT INTO affiliate_clicks (link_id, referer, user_agent) VALUES (?, ?, ?)')
+      .bind(linkId, c.req.header('Referer') || null, (c.req.header('User-Agent') || '').slice(0, 300) || null)
+      .run()
+  } catch { /* 計測テーブル未整備でも導線は生かす */ }
+  return c.redirect(link.affiliate_url, 302)
 })
 
 // 用語注釈サジェスト(素人向け注釈チェック)
@@ -802,7 +827,7 @@ app.post('/api/riko/crawl', async (c) => {
 app.get('/api/cron/status', async (c) => {
   const { DB } = c.env
   const logs = await DB.prepare(
-    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'image_plan', 'note_diagrams', 'auto_note', 'daily_analysis', 'weekly_analysis', 'monthly_analysis', 'daily_report', 'quote_crawl', 'auto_publish', 'kpi_collect', 'competitor_research', 'monthly_note', 'note_cover', 'mention_collect', 'reply_publish', 'slot_optimize', 'post_recycle') ORDER BY id DESC LIMIT 22"
+    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'image_plan', 'note_diagrams', 'auto_note', 'daily_analysis', 'weekly_analysis', 'monthly_analysis', 'daily_report', 'quote_crawl', 'auto_publish', 'kpi_collect', 'competitor_research', 'monthly_note', 'note_cover', 'mention_collect', 'reply_publish', 'slot_optimize', 'post_recycle', 'self_repost') ORDER BY id DESC LIMIT 22"
   ).all()
   return c.json({
     secretConfigured: !!c.env.CRON_SECRET,

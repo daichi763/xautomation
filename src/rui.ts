@@ -71,6 +71,21 @@ async function collectKpiFacts(db: D1Database, days: number): Promise<string> {
     .all()
   const notes = (noteRows.results || []) as any[]
 
+  // ③ アフィリンククリック集計(/go/:link_id 経由の計測)
+  let clicks: any[] = []
+  try {
+    const clickRows = await db
+      .prepare(
+        `SELECT l.tool_name, l.program, COUNT(c.id) AS clicks
+         FROM affiliate_clicks c JOIN affiliate_links l ON l.link_id = c.link_id
+         WHERE c.clicked_at > datetime('now', ?)
+         GROUP BY c.link_id ORDER BY clicks DESC`,
+      )
+      .bind(`-${days} days`)
+      .all()
+    clicks = (clickRows.results || []) as any[]
+  } catch { /* affiliate_clicks未整備の環境でも分析は続行 */ }
+
   const kpiText = kpis.length
     ? kpis.map((k) => `${k.date}: フォロワー${k.x_followers} / imp${k.x_impressions_total} / eng${k.x_engagements_total} / note販売${k.note_paid_sales} / アフィ収益${k.affiliate_revenue}円`).join('\n')
     : '(KPIデータなし)'
@@ -83,6 +98,9 @@ async function collectKpiFacts(db: D1Database, days: number): Promise<string> {
   const noteText = notes.length
     ? notes.map((n) => `[${n.type}|${n.pub_date}] ${n.title}: view${n.view_count} 売上${n.sales_count}件/${n.revenue_yen}円`).join('\n')
     : '(公開済みnoteなし)'
+  const clickText = clicks.length
+    ? clicks.map((cl) => `${cl.tool_name}${cl.program ? `(${cl.program})` : ''}: ${cl.clicks}クリック`).join('\n')
+    : '(クリックなし — アフィリンク未埋込または読者がまだ踏んでいない)'
 
   return `## KPI日次推移(直近${days + 1}日)
 ${kpiText}
@@ -95,6 +113,9 @@ ${slotText}
 
 ## note実績
 ${noteText}
+
+## アフィリンククリック(直近${days}日・/go/計測)
+${clickText}
 
 ※注意: X API未接続の期間は投稿実績・KPIがデモ/ゼロ値の可能性があります。その場合は分析にその前提を明記してください。`
 }

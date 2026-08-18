@@ -186,6 +186,28 @@ export async function postTweet(creds: XCredentials, text: string, mediaIds?: st
   }
 }
 
+// ④ セルフリポスト: 自分のツイートをRT(POST /2/users/:id/retweets)
+// コスト: Post Create扱いではなくWrite系 — Pay-Per-Use では安価なWriteアクション
+export async function retweet(creds: XCredentials, userId: string, tweetId: string): Promise<{ ok: boolean; error?: string }> {
+  const url = `https://api.twitter.com/2/users/${userId}/retweets`
+  try {
+    const auth = await buildOAuthHeader(creds, 'POST', url)
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tweet_id: tweetId }),
+    })
+    const data: any = await res.json()
+    if (!res.ok) {
+      const detail = data?.detail || data?.errors?.[0]?.message || data?.title || `HTTP ${res.status}`
+      return { ok: false, error: detail }
+    }
+    return { ok: !!data.data?.retweeted }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'ネットワークエラー' }
+  }
+}
+
 export interface XThreadResult {
   ok: boolean
   tweetIds: string[]      // 投稿できた全ツイートID(先頭が親)
