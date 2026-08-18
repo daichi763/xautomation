@@ -44,7 +44,7 @@ async function updateApprovalBadge() {
 /* ============ オフィスビュー ============ */
 async function renderOffice() {
   const { data } = await axios.get('/api/office');
-  const { workers, tasks, kpi_today, kpi_yesterday, pending_approvals, recent_logs } = data;
+  const { workers, tasks, kpi_today, kpi_yesterday, pending_approvals, recent_logs, note_session } = data;
   let nanaReport = null;
   let weekPlan = null;
   try { nanaReport = (await axios.get('/api/reports/daily')).data.reports?.[0] || null; } catch (e) {}
@@ -57,6 +57,17 @@ async function renderOffice() {
 
   $app.innerHTML = `
   <div class="fade-in space-y-6">
+    ${note_session?.status === 'expired' ? `
+    <section id="note-session-alert" class="bg-red-50 border border-red-300 rounded-xl p-4 flex items-center justify-between flex-wrap gap-2">
+      <div class="flex items-center gap-3">
+        <i class="fas fa-triangle-exclamation text-red-500 text-xl"></i>
+        <div>
+          <p class="font-bold text-red-700">noteログインCookieが失効しています</p>
+          <p class="text-xs text-slate-500">note閲覧数・メンバー数の自動収集が止まっています(最終確認: ${esc(note_session.checked_at || '-')})。ブラウザでnoteに再ログインしてCookieを再登録してください</p>
+        </div>
+      </div>
+      <button onclick="navigate('kpi')" class="bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90"><i class="fas fa-key mr-1"></i>再登録する</button>
+    </section>` : ''}
     ${pendingTotal > 0 ? `
     <section id="approval-alert" class="bg-orange-50 border border-orange-300 rounded-xl p-4 flex items-center justify-between flex-wrap gap-2">
       <div class="flex items-center gap-3">
@@ -620,9 +631,9 @@ async function renderKPI() {
     <section id="kpi-input-section" class="bg-white rounded-xl shadow p-4 border-l-4 border-emerald-500">
       <div class="flex items-center justify-between flex-wrap gap-2 mb-1">
         <h3 class="font-bold text-sm text-brand-navy"><i class="fas fa-pen-to-square mr-1 text-emerald-600"></i>📊 数値入力(1日2分の収益記録)</h3>
-        <button id="kpi-auto-collect-btn" class="bg-emerald-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:opacity-90"><i class="fas fa-rotate mr-1"></i>自動収集を今実行(X/noteフォロワー)</button>
+        <button id="kpi-auto-collect-btn" class="bg-emerald-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:opacity-90"><i class="fas fa-rotate mr-1"></i>自動収集を今実行</button>
       </div>
-      <p class="text-[11px] text-slate-500 mb-3">Xフォロワー・noteフォロワーは毎朝自動収集。以下はAPIで取得できないため手入力です(空欄は上書きしません)</p>
+      <p class="text-[11px] text-slate-500 mb-3">自動収集: Xフォロワー・Xインプレ/エンゲージ(直近20投稿)・noteフォロワー・note閲覧数・メンバー数。手入力は note売上とアフィ収益のみです(空欄は上書きしません)</p>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
         <label class="block"><span class="text-slate-500">日付</span><input id="kpi-date" type="date" value="${todayJst}" class="w-full border border-slate-200 rounded-lg px-2 py-1.5 mt-0.5"></label>
         <label class="block"><span class="text-slate-500">Xインプレッション(累計)</span><input id="kpi-imp" type="number" min="0" placeholder="${latestKpi.x_impressions_total || 0}" class="w-full border border-slate-200 rounded-lg px-2 py-1.5 mt-0.5"></label>
@@ -638,6 +649,33 @@ async function renderKPI() {
         <input id="note-username-input" type="text" value="${esc(settings.note_username || '')}" placeholder="例: mune_ai_fukugyo (note.com/○○ の○○部分)" class="border border-slate-200 rounded-lg px-2 py-1.5 w-64">
         <button id="note-username-save-btn" class="bg-slate-600 text-white font-bold rounded-lg px-3 py-1.5">設定</button>
         <span class="text-[10px] text-slate-400">設定するとnoteフォロワー数・スキ数を毎朝自動取得します</span>
+      </div>
+      <div id="note-session-row" class="mt-2 pt-2 border-t border-slate-100 text-xs">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-slate-500"><i class="fas fa-cookie-bite mr-1"></i>noteログインCookie(閲覧数・メンバー数の自動収集用):</span>
+          ${settings.note_session_registered === 'yes'
+            ? (settings.note_session_status === 'expired'
+               ? `<span class="bg-red-100 text-red-700 font-bold px-2 py-0.5 rounded"><i class="fas fa-triangle-exclamation mr-1"></i>失効中 — 再登録してください</span>`
+               : `<span class="bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded"><i class="fas fa-circle-check mr-1"></i>登録済み(末尾…${esc(settings.note_session_tail || '')})</span>`)
+            : `<span class="bg-slate-100 text-slate-500 px-2 py-0.5 rounded">未登録</span>`}
+          ${settings.note_session_checked_at ? `<span class="text-[10px] text-slate-400">最終確認: ${esc(settings.note_session_checked_at)}</span>` : ''}
+        </div>
+        <div class="flex items-center gap-2 flex-wrap mt-2">
+          <input id="note-session-input" type="password" placeholder="_note_session_v5 の値を貼り付け(名前=値 形式でもOK)" class="border border-slate-200 rounded-lg px-2 py-1.5 w-80">
+          <button id="note-session-save-btn" class="bg-slate-600 text-white font-bold rounded-lg px-3 py-1.5">${settings.note_session_registered === 'yes' ? '再登録' : '登録'}</button>
+          <button id="note-session-help-btn" class="text-brand-navy underline">取得手順</button>
+        </div>
+        <div id="note-session-help" class="hidden mt-2 bg-slate-50 rounded-lg p-3 text-[11px] text-slate-600 leading-relaxed">
+          <p class="font-bold mb-1">📋 Cookieの取得手順(Chrome、1分)</p>
+          <ol class="list-decimal ml-4 space-y-0.5">
+            <li>PCのChromeで note.com を開き、ログインした状態にする</li>
+            <li>F12キー(または右クリック→検証)で開発者ツールを開く</li>
+            <li>上部タブの「Application」(アプリケーション)→左側「Cookie」→「https://note.com」をクリック</li>
+            <li>一覧から <code class="bg-white px-1 rounded border">_note_session_v5</code> を探し、Value列の値をダブルクリック→コピー</li>
+            <li>上の入力欄に貼り付けて「登録」→ 自動で有効性を検証します</li>
+          </ol>
+          <p class="mt-1 text-slate-400">※ 有効期限は数か月です。失効するとオフィス画面に赤い通知が出るので、同じ手順で再登録してください。Cookieはパスワード相当の秘密情報のため、このアプリ以外には貼らないでください。</p>
+        </div>
       </div>
     </section>
 
@@ -743,13 +781,17 @@ async function renderKPI() {
       const { data } = await axios.post('/api/kpi/collect');
       const parts = [];
       if (data.xFollowers !== undefined) parts.push(`Xフォロワー: ${data.xFollowers}`);
+      if (data.xImpressions !== undefined) parts.push(`Xインプレ: ${data.xImpressions.toLocaleString()}`);
       if (data.noteFollowers !== undefined) parts.push(`noteフォロワー: ${data.noteFollowers}`);
+      if (data.noteViewsTotal !== undefined) parts.push(`note閲覧: ${data.noteViewsTotal.toLocaleString()}`);
+      if (data.membershipCount !== undefined) parts.push(`メンバー: ${data.membershipCount}人`);
+      if (data.noteSessionStatus === 'expired') toast('⚠️ noteログインCookieが失効しています。再登録してください', 'error');
       toast(parts.length ? `自動収集完了 — ${parts.join(' / ')}` : (data.errors?.[0] || '取得できる指標がありませんでした'), parts.length ? 'success' : 'error');
       renderKPI();
     } catch (e) {
       toast(e.response?.data?.errors?.[0] || '自動収集に失敗しました', 'error');
       btn.disabled = false;
-      btn.innerHTML = '<i class="fas fa-rotate mr-1"></i>自動収集を今実行(X/noteフォロワー)';
+      btn.innerHTML = '<i class="fas fa-rotate mr-1"></i>自動収集を今実行';
     }
   });
   document.getElementById('note-username-save-btn')?.addEventListener('click', async () => {
@@ -759,6 +801,25 @@ async function renderKPI() {
       toast('noteユーザー名を設定しました。明日から自動収集されます');
     } catch (e) {
       toast(e.response?.data?.error || '設定に失敗しました', 'error');
+    }
+  });
+  document.getElementById('note-session-help-btn')?.addEventListener('click', () => {
+    document.getElementById('note-session-help')?.classList.toggle('hidden');
+  });
+  document.getElementById('note-session-save-btn')?.addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    const value = document.getElementById('note-session-input')?.value || '';
+    if (!value.trim()) { toast('Cookie値を貼り付けてください', 'error'); return; }
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>検証中...';
+    try {
+      const { data } = await axios.post('/api/settings', { key: 'note_session_v5', value });
+      toast(`Cookieを登録しました${data.nickname ? `(${data.nickname} さんとして認証確認済み)` : ''}。note閲覧数・メンバー数が自動収集されます`);
+      renderKPI();
+    } catch (e) {
+      toast(e.response?.data?.error || 'Cookieの登録に失敗しました', 'error');
+      btn.disabled = false;
+      btn.innerHTML = '登録';
     }
   });
   document.querySelectorAll('.note-stat-save-btn').forEach((btn) => {

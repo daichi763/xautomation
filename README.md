@@ -8,7 +8,8 @@
   - 🏢 **オフィスビュー**: 取締役デスク+9ワーカーの稼働状態をリアルタイム表示(15秒毎に自動更新/デモ用「時間を進める」ボタンあり)
   - ✅ **承認2ゲート**:  ①日次X投稿12本の一括/個別承認・差戻(理由付き) ②有料note全文プレビュー→公開
   - 📊 **KPIダッシュボード**: フォロワー・売上の2軸グラフ(Chart.js)+日次明細テーブル+**KPI手動入力フォーム**(Xインプレ/note売上/メンバー数/アフィ収益)+**記事別売上入力**
-  - 🔄 **KPI自動収集(ハイブリッド)**: Xフォロワー数(X API無料枠)・noteフォロワー数・スキ累計(note公開API)を毎日自動取得。インプレ・note売上・メンバー数・アフィ収益は手動入力(API非公開のため)。自動値と手動値は互いに上書きしない設計
+  - 🔄 **KPI自動収集(ほぼ全自動)**: Xフォロワー数・Xインプレ/エンゲージメント(直近20投稿、X API従量課金)・noteフォロワー数・スキ累計(note公開API)・**note閲覧数PV・メンバー数(note session Cookie登録で有効化)**を毎日自動取得。手動入力はnote売上とアフィ収益のみ(売上API非存在のため)。自動値と手動値は互いに上書きしない設計
+  - 🍪 **note session Cookie管理**: KPI画面から `_note_session_v5` Cookieを登録(保存前に自動検証)。**失効を毎朝自動検知しオフィス画面に赤い通知バナーを表示→ワンクリックで再登録画面へ**。Cookie値はAPIレスポンスでマスク(末尾4桁のみ表示)
   - 🛡️ **QAチェッカー(Mio)**: 禁止表現・法令リスク(薬機法/景表法/金商法/ステマ規制)を実際に検出する実動ロジック
   - 🔗 **アフィリンク自動埋め込み**: 提携済みリンクを1回登録すれば、投稿文からツール名を自動検出してリンク+PR表記を自動挿入(承認画面のワンボタン/埋め込み後に自動再QA)
   - 📖 **用語注釈辞書**: 固有名詞(KDP・Etsy等)の素人向け注釈を辞書管理。Yutoの執筆ルールに組み込み
@@ -41,7 +42,7 @@
 | GET | `/api/kpi?days=14` | KPI履歴+サマリ |
 | POST | `/api/kpi/daily` | KPI手動入力(インプレ/note売上/メンバー数/アフィ収益等、未入力項目は上書きしない) |
 | POST | `/api/kpi/collect` | KPI自動収集を今すぐ実行(Xフォロワー+noteフォロワー/スキ) |
-| GET/POST | `/api/settings` | アプリ設定(noteユーザー名の登録等) |
+| GET/POST | `/api/settings` | アプリ設定(noteユーザー名 / note session Cookieの登録。Cookieは保存前に自動検証・レスポンスではマスク) |
 | POST | `/api/notes/:id/url` | 公開済みnoteの実URL登録(枠11の宣伝投稿が実URL連動に) |
 | POST | `/api/notes/:id/stats` | 記事別の閲覧数/売上件数/売上金額を記録 |
 | POST | `/api/notes/monthly/run` | 月次まとめnote(¥500)を今すぐ生成 |
@@ -70,9 +71,12 @@
 ## データアーキテクチャ
 - **ストレージ**: Cloudflare D1(ローカルは `--local` SQLite) + R2(生成画像の保存)
 - **テーブル**: `worker_status` / `worker_logs` / `topic_candidates` / `x_posts` / `note_articles`(note_url・cover_image_id列含む) / `kpi_daily` / `approval_queue` / `task_queue` / `affiliate_links` / `glossary` / `generated_images` / `daily_reports`(Nana) / `analysis_reports`(Rui・競合リサーチ含む) / `weekly_plans`(Alex) / `auth_users` / `auth_sessions` / `app_settings`
-- **KPI収集の仕組み(ハイブリッド)**:
-  - 自動: Xフォロワー数(X API無料枠 `/2/users/me`)、noteフォロワー数・スキ累計(note公開API — KPI画面でnoteユーザー名を設定すると有効化)
-  - 手動: Xインプレッション(X API有料枠のため)、note売上・メンバー数(noteはAPI非公開・ダッシュボード目視)、アフィ収益(ASP管理画面目視)。KPI画面の入力フォームで1日2分で入力
+- **KPI収集の仕組み(ほぼ全自動)**:
+  - 自動(X API従量課金 — 月$1.5程度): Xフォロワー数(`/2/users/me` $0.01/回)、Xインプレ/エンゲージメント(`/2/users/{id}/tweets` Owned Read $0.001/件・直近20投稿)
+  - 自動(note公開API — 無料): noteフォロワー数・スキ累計(KPI画面でnoteユーザー名を設定すると有効化)
+  - 自動(note非公式API — session Cookie必要): note閲覧数PV(`/api/v1/stats/pv`)、メンバー数(`/api/v2/circle/members`)。KPI画面で `_note_session_v5` Cookieを登録すると有効化。低頻度アクセス(1日1回)の個人利用
+  - **Cookie失効の自動検知**: 毎朝の収集時に401/403やデータ空を検知すると `note_session_status='expired'` を記録→オフィス画面最上部に赤い通知バナー(「再登録する」ボタン付き)を表示。再登録時は保存前に有効性を自動検証
+  - 手動(API非存在): note売上件数・金額(noteダッシュボード目視)、アフィ収益(ASP管理画面目視)。KPI画面の入力フォームで1日30秒で入力
   - UPSERTはCOALESCE方式: 自動収集と手動入力が互いの値を上書きしない
 - **データフロー**: 企画承認→Kai翻訳タスク投入 / 投稿承認→Sora予約タスク投入 / 差戻→Yuto書き直しタスク投入(task_queue経由で連鎖)
 - **QAロジック**: `src/qa-rules.ts` に禁止表現DB(指示書08章)を実装。API・UI両方から利用

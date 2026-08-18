@@ -116,8 +116,8 @@ export async function uploadMedia(creds: XCredentials, imageB64: string): Promis
   }
 }
 
-// 自分のアカウント情報取得 (GET /2/users/me — 無料プランで利用可、24h/25リクエスト制限内)
-export async function fetchMyProfile(creds: XCredentials): Promise<{ ok: boolean; followers?: number; username?: string; error?: string }> {
+// 自分のアカウント情報取得 (GET /2/users/me — 従量課金: User Read $0.010/回)
+export async function fetchMyProfile(creds: XCredentials): Promise<{ ok: boolean; userId?: string; followers?: number; username?: string; error?: string }> {
   const url = 'https://api.twitter.com/2/users/me'
   try {
     const auth = await buildOAuthHeader(creds, 'GET', url, { 'user.fields': 'public_metrics' })
@@ -130,9 +130,40 @@ export async function fetchMyProfile(creds: XCredentials): Promise<{ ok: boolean
     }
     return {
       ok: true,
+      userId: data.data?.id,
       followers: data.data?.public_metrics?.followers_count ?? 0,
       username: data.data?.username,
     }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'ネットワークエラー' }
+  }
+}
+
+// 自分の直近投稿のインプレッション/エンゲージメント合計
+// (GET /2/users/{id}/tweets — Owned Read $0.001/件の特別価格、20件で$0.02/日。同一リソースは24h重複排除)
+export async function fetchMyTweetsMetrics(
+  creds: XCredentials,
+  userId: string,
+): Promise<{ ok: boolean; impressions?: number; engagements?: number; tweetCount?: number; error?: string }> {
+  const url = `https://api.twitter.com/2/users/${userId}/tweets`
+  const params: Record<string, string> = { max_results: '20', 'tweet.fields': 'public_metrics' }
+  try {
+    const auth = await buildOAuthHeader(creds, 'GET', url, params)
+    const qs = Object.keys(params).sort().map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`).join('&')
+    const res = await fetch(`${url}?${qs}`, { headers: { 'Authorization': auth } })
+    const data: any = await res.json()
+    if (!res.ok) {
+      return { ok: false, error: data?.detail || data?.title || `HTTP ${res.status}` }
+    }
+    const tweets: any[] = Array.isArray(data.data) ? data.data : []
+    let impressions = 0
+    let engagements = 0
+    for (const t of tweets) {
+      const m = t?.public_metrics || {}
+      impressions += m.impression_count || 0
+      engagements += (m.like_count || 0) + (m.retweet_count || 0) + (m.reply_count || 0) + (m.quote_count || 0)
+    }
+    return { ok: true, impressions, engagements, tweetCount: tweets.length }
   } catch (e: any) {
     return { ok: false, error: e?.message || 'ネットワークエラー' }
   }

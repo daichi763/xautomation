@@ -80,20 +80,24 @@ app.post('/api/auth/logout', async (c) => {
 // オフィス全体の状態(ワーカー + 承認待ち件数 + 本日KPI)
 app.get('/api/office', async (c) => {
   const { DB } = c.env
-  const [workers, tasks, kpi, pendingApprovals, recentLogs] = await Promise.all([
+  const [workers, tasks, kpi, pendingApprovals, recentLogs, sessionStatus] = await Promise.all([
     DB.prepare('SELECT * FROM worker_status ORDER BY rowid').all(),
     DB.prepare("SELECT * FROM task_queue WHERE status IN ('queued','processing') ORDER BY priority LIMIT 20").all(),
     DB.prepare("SELECT * FROM kpi_daily ORDER BY date DESC LIMIT 2").all(),
     DB.prepare("SELECT gate_type, COUNT(*) as cnt FROM approval_queue WHERE responded_at IS NULL GROUP BY gate_type").all(),
-    DB.prepare('SELECT * FROM worker_logs ORDER BY started_at DESC LIMIT 10').all()
+    DB.prepare('SELECT * FROM worker_logs ORDER BY started_at DESC LIMIT 10').all(),
+    DB.prepare("SELECT key, value FROM app_settings WHERE key IN ('note_session_status','note_session_checked_at')").all()
   ])
+  const ss: Record<string, string> = {}
+  for (const r of (sessionStatus.results || []) as any[]) ss[r.key] = r.value
   return c.json({
     workers: workers.results,
     tasks: tasks.results,
     kpi_today: kpi.results?.[0] ?? null,
     kpi_yesterday: kpi.results?.[1] ?? null,
     pending_approvals: pendingApprovals.results,
-    recent_logs: recentLogs.results
+    recent_logs: recentLogs.results,
+    note_session: { status: ss['note_session_status'] || 'unset', checked_at: ss['note_session_checked_at'] || null }
   })
 })
 
@@ -530,23 +534,50 @@ app.post('/api/kpi/collect', async (c) => {
   return c.json(result, result.ok || result.errors.length < 2 ? 200 : 502)
 })
 
-// アプリ設定(noteユーザー名など)
+// アプリ設定(noteユーザー名・note sessionクッキーなど)
+// ※ note_session_v5 の値は漏洩防止のためマスクして返す(登録有無と末尾4桁のみ)
 app.get('/api/settings', async (c) => {
   const rows = await c.env.DB.prepare('SELECT key, value FROM app_settings').all()
   const settings: Record<string, string> = {}
-  for (const r of (rows.results || []) as any[]) settings[r.key] = r.value
+  for (const r of (rows.results || []) as any[]) {
+    if (r.key === 'note_session_v5') {
+      settings['note_session_registered'] = r.value ? 'yes' : 'no'
+      settings['note_session_tail'] = r.value ? String(r.value).slice(-4) : ''
+    } else {
+      settings[r.key] = r.value
+    }
+  }
   return c.json({ settings })
 })
 
 app.post('/api/settings', async (c) => {
   const { key, value } = await c.req.json<{ key: string; value: string }>()
-  const ALLOWED = ['note_username']
+  const ALLOWED = ['note_username', 'note_session_v5']
   if (!ALLOWED.includes(key)) return c.json({ error: `設定可能なキー: ${ALLOWED.join(', ')}` }, 400)
+  let v = String(value || '').trim()
+
+  if (key === 'note_session_v5') {
+    // 貼り付けミス対策: 「_note_session_v5=値」形式やCookieヘッダー丸ごとにも対応
+    const m = v.match(/_note_session_v5=([^;\s]+)/)
+    if (m) v = m[1]
+    if (!v) return c.json({ error: 'Cookie値が空です' }, 400)
+    // 保存前に有効性を検証
+    const { checkNoteSession, setSetting } = await import('./kpi-collector')
+    const check = await checkNoteSession(v)
+    if (!check.valid) {
+      return c.json({ error: `Cookieの検証に失敗しました: ${check.error}。ブラウザでnoteにログインし直してから再度コピーしてください` }, 400)
+    }
+    await setSetting(c.env.DB, 'note_session_v5', v)
+    await setSetting(c.env.DB, 'note_session_status', 'ok')
+    await setSetting(c.env.DB, 'note_session_checked_at', new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' '))
+    return c.json({ ok: true, key, verified: true, nickname: check.nickname || null })
+  }
+
   await c.env.DB.prepare(
     `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = CURRENT_TIMESTAMP`,
-  ).bind(key, String(value || '').trim(), String(value || '').trim()).run()
-  return c.json({ ok: true, key, value: String(value || '').trim() })
+  ).bind(key, v, v).run()
+  return c.json({ ok: true, key, value: v })
 })
 
 app.get('/api/kpi', async (c) => {
