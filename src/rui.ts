@@ -24,7 +24,7 @@ X投稿とnoteのKPIデータを分析し、仮説と改善アクションを導
 
 export interface RuiResult {
   ok: boolean
-  reportType: 'daily' | 'weekly'
+  reportType: 'daily' | 'weekly' | 'monthly'
   reportId?: string
   bodyMd?: string
   proposals?: { title: string; reason: string; action: string; expected: string }[]
@@ -187,6 +187,60 @@ ${facts}
     return result
   } catch (e: any) {
     result.error = e?.message || 'Rui週次実行エラー'
+    return result
+  }
+}
+
+// 月次分析: 毎月1日に前月30日分の総括+来月戦略 (取締役向け)
+export async function runRuiMonthly(db: D1Database, apiKey: string): Promise<RuiResult> {
+  const result: RuiResult = { ok: false, reportType: 'monthly', costUsd: 0 }
+  try {
+    // 同月の重複実行ガード
+    const thisMonth = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 7)
+    const existing = await db
+      .prepare("SELECT report_id FROM analysis_reports WHERE report_type = 'monthly' AND report_date LIKE ? LIMIT 1")
+      .bind(`${thisMonth}%`).first()
+    if (existing) {
+      result.ok = true
+      result.error = '今月の月次分析は作成済みのためスキップしました'
+      return result
+    }
+
+    const facts = await collectKpiFacts(db, 30)
+    const userPrompt = `以下の30日分のデータをもとに【月次振り返り+来月戦略】を作成してください。取締役(Mさん)向けの報告書です。
+
+${facts}
+
+## 出力形式(Markdown)
+# 月次レポート
+## 1. 今月の総括(数字ベース: フォロワー/インプ/note売上/収益)
+## 2. うまくいったこと(仮説付き)
+## 3. うまくいかなかったこと(仮説付き)
+## 4. 来月の戦略(優先度順に3〜5項目、それぞれ具体アクションと期待効果)
+
+データが少ない/デモ値の場合はその旨を明記した上で、立ち上げ期として妥当な戦略を提示してください。`
+
+    const llm: LlmResult = await callOpenAI(apiKey, 'gpt-5', RUI_SYSTEM, userPrompt, 16000, 'medium') // 推論トークン込み
+    if (!llm.ok) {
+      result.error = `Rui月次分析失敗: ${llm.error}`
+      return result
+    }
+    result.costUsd = llm.costUsd || 0
+
+    const today = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)
+    const reportId = `ar-m-${Date.now()}`
+    await db
+      .prepare(
+        `INSERT INTO analysis_reports (report_id, report_type, report_date, body_md, proposals_json, cost_usd) VALUES (?, 'monthly', ?, ?, NULL, ?)`,
+      )
+      .bind(reportId, today, llm.content.trim(), result.costUsd)
+      .run()
+    result.ok = true
+    result.reportId = reportId
+    result.bodyMd = llm.content.trim()
+    return result
+  } catch (e: any) {
+    result.error = e?.message || 'Rui月次実行エラー'
     return result
   }
 }

@@ -47,6 +47,8 @@
 | GET | `/api/cron/status` | 自動サイクル状態+実行履歴 |
 | GET | `/api/reports/daily` | Nana日次レポート(直近7件) |
 | POST | `/api/reports/daily/run` | Nanaレポートを今すぐ生成 |
+| POST | `/api/reports/analysis/run` | Rui日次分析を今すぐ実行 |
+| GET | `/api/quote/candidates` | 引用RT候補(日本語話題ツイート)のプレビュー |
 | GET | `/api/reports/analysis` | Rui分析レポート(日次/週次) |
 | GET | `/api/plans/weekly` | Alex週次計画(直近4週) |
 | POST | `/api/cron/run` | 定時実行エンドポイント(`Authorization: Bearer CRON_SECRET` 必須、セッション不要) |
@@ -68,7 +70,7 @@
 ## 指示書からの変更点(改善)
 元の指示書はAI作成のため、以下を現実的な構成に調整しました:
 1. **Cloudflare Queues → D1テーブル(task_queue)**: Queues は Pages では利用不可+有料機能のため、D1で同等のキュー機構を実装(挙動は同一、後からWorkers移行可)
-2. **Cron Triggers → GitHub Actions 定時実行**: Pages では Cron 未対応のため、GitHub Actionsから `/api/cron/run` を定時呼び出し。JST 06:00=朝サイクル(Riko巡回)、JST 21:00=夕サイクル(Yuto執筆)。CRON_SECRETのBearer認証で保護
+2. **Cron Triggers → GitHub Actions 毎時実行**: Pages では Cron 未対応のため、GitHub Actionsから `/api/cron/run` を毎時呼び出し(毎時10分)。サーバー側で振り分け: JST 5時台=フルパイプライン(1日1回ガード付き)、毎時=Sora自動予約投稿(承認済み+投稿時刻到来分をXへ)。CRON_SECRETのBearer認証で保護
    - **有効化手順(2分・手動)**: GitHub App権限の制約でワークフローの自動配置ができないため、①リポジトリ直下の `github-actions-cron.yml` を `.github/workflows/cron.yml` にリネームして配置(GitHub Web UIの「Add file」でOK)、② Settings → Secrets and variables → Actions で `CRON_SECRET` を登録(値は取締役に別途共有)。それまでは承認画面の手動ボタンで同じ処理を実行可能
 3. **LLM/Buffer/note自動投稿は未接続**: APIキー(OpenAI/Buffer)とnote認証情報が必要なため、タスク投入までを実装。キー提供後に接続可能
 4. **LLMをAnthropic Claude→OpenAI GPT-5ファミリに変更**: ユーザーのOpenAI APIキーで運用可能に。モデル割当とコスト試算はダッシュボードの「AIコスト」タブで可視化(`src/model-plan.ts` / `/api/models/cost`)
@@ -120,7 +122,9 @@
 4. **QAチェック**: 自分で書いた投稿文を貼ると、Mioが禁止表現を検出(例:「誰でも簡単に稼げる」→ 景表法指摘)。「Mio 実AIチェック」ボタンでGPT-5 miniによる深い審査+書き直し案も取得可能
 5. **AI執筆(Yuto)**: QAタブの「Yuto AI執筆スタジオ」でテーマを入れるとGPT-5が注釈・円換算・法令ルールを守った投稿を執筆。承認キューへの追加も可能
 6. **AIリライト**: 承認画面でQA要修正の投稿に「Yuto(AI)にリライトさせる」ボタンが出現。指摘を解消した文面に自動書き換え
-7. **全自動パイプライン(「朝起きたら全部揃っている」運用)**: 毎朝JST 05:30に [月曜のみ]Alex週次計画 → Riko巡回(10ネタ) → Kai上位4ネタ深堀り翻訳 → Yuto12枠執筆+Aki枠3図解生成 → note記事1本執筆(日曜=有料) → Rui分析(日曜は週次も) → Nana日次レポート。取締役の操作はゲート②の一括承認+ゲート③のnote公開判断のみ
+7. **全自動パイプライン(「朝起きたら全部揃っている」運用)**: 毎朝JST 5時台に [月曜のみ]Alex週次計画 → Riko巡回(10ネタ) → Kai上位4ネタ深堀り翻訳 → 話題ツイート収集(日本語・Yahoo!リアルタイム検索) → Yuto12枠執筆(枠6=引用RT)+Aki枠3図解生成 → note記事1本執筆(日曜=有料) → Rui分析(日曜は週次、毎月1日は月次も) → Nana日次レポート。取締役の操作はゲート②の一括承認+ゲート③のnote公開判断のみ
+8. **枠6 引用RT(無料実装)**: Yahoo!リアルタイム検索で日本語の話題ツイートを収集(RT×2+リプ数でスコアリング、スパム/挨拶投稿除外、引用済み除外)→Yutoが「僕の視点の気づき」を添えた引用コメントを執筆→承認画面に引用元原文を表示→投稿時は`quote_tweet_id`で本物の引用RTに。投稿直前にoEmbedで引用元の生存確認(削除済みなら通常投稿に自動切替)。候補なしの日は従来型の通常投稿
+9. **Sora自動予約投稿**: 毎時cronが承認済み・投稿時刻到来の投稿を自動でXへ(画像添付・引用RT対応)。X APIキー未登録の間は何もせずエラーにもならない
 9. **note公開(ゲート③)**: 承認画面で「全文プレビュー」→有料記事はオレンジの破線が有料化ライン。「Markdownをコピー」→noteエディタに貼付→有料ラインを設定して公開→アプリの「公開する」ボタンで記録
 8. **初回ログイン**: 許可メールアドレスと新しいパスワード(8文字以上)で初回登録。2回目以降は同じメール+パスワードでログイン(30日間有効)
 
@@ -137,4 +141,4 @@ pm2 start ecosystem.config.cjs                         # 起動(port 3000)
 - **ステータス**: ✅ 本番稼働中
 - **DB**: 管理D1(スキーマ+シードデータ適用済み)
 - **技術スタック**: Hono + TypeScript + D1(SQLite) + TailwindCSS(CDN) + Chart.js
-- **最終更新**: 2026-08-17
+- **最終更新**: 2026-08-18

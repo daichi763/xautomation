@@ -294,8 +294,8 @@ async function renderApprove() {
           <thead><tr class="text-left text-slate-400 border-b"><th class="py-1 pr-3">日時</th><th class="py-1 pr-3">ワーカー</th><th class="py-1 pr-3">処理</th><th class="py-1 pr-3">結果</th><th class="py-1">詳細</th></tr></thead>
           <tbody>${cronStatus.recentRuns.map((r) => {
             let d = {}; try { d = JSON.parse(r.output_json || '{}'); } catch (e) {}
-            const WORKER_JA = { alex: 'Alex', riko: 'Riko', kai: 'Kai', yuto: 'Yuto', aki: 'Aki', rui: 'Rui', nana: 'Nana', mio: 'Mio' };
-            const ACTION_JA = { weekly_plan: '週次計画', auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: 'X執筆', auto_note: 'note執筆', auto_qa: 'QA審査', auto_infographic: '図解生成', daily_analysis: '日次分析', weekly_analysis: '週次分析', daily_report: '日次レポート' };
+            const WORKER_JA = { alex: 'Alex', riko: 'Riko', kai: 'Kai', yuto: 'Yuto', aki: 'Aki', sora: 'Sora', rui: 'Rui', nana: 'Nana', mio: 'Mio' };
+            const ACTION_JA = { weekly_plan: '週次計画', auto_crawl: '巡回(自動)', manual_crawl: '巡回(手動)', auto_translate: '翻訳', auto_write: 'X執筆', auto_note: 'note執筆', auto_qa: 'QA審査', auto_infographic: '図解生成', daily_analysis: '日次分析', weekly_analysis: '週次分析', monthly_analysis: '月次分析', daily_report: '日次レポート', quote_crawl: '話題ツイート収集', auto_publish: '自動投稿', x_publish: 'X投稿(手動)' };
             let detail = '';
             if (r.worker_name === 'riko') detail = `収集${d.collected ?? '-'}件 → ネタ${d.inserted ?? '-'}件投入${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
             else if (r.worker_name === 'kai') detail = `翻訳${d.translated ?? '-'}本${d.costUsd ? ` ($${d.costUsd.toFixed(4)})` : ''}`;
@@ -392,6 +392,14 @@ function postCard(p) {
       ${qaBadge(p.qa_status, p.qa_issues)}
     </div>
     <p class="text-sm whitespace-pre-wrap leading-relaxed flex-1">${esc(p.body)}</p>
+    ${p.quote_tweet_id ? `<div class="quote-source bg-sky-50 border border-sky-200 rounded-lg p-2 text-xs">
+      <div class="flex items-center justify-between mb-1">
+        <span class="font-bold text-sky-700"><i class="fas fa-quote-left mr-1"></i>引用元ツイート ${esc(p.quote_author || '')}</span>
+        <a href="https://x.com/${esc((p.quote_author || '').replace('@', ''))}/status/${esc(p.quote_tweet_id)}" target="_blank" class="text-sky-500 underline">Xで見る</a>
+      </div>
+      <p class="text-slate-600 whitespace-pre-wrap">${esc((p.quote_text || '').slice(0, 200))}${(p.quote_text || '').length > 200 ? '…' : ''}</p>
+      <p class="text-[10px] text-slate-400 mt-1">※承認するとこのツイートへの引用RTとして投稿されます(投稿時に削除済みなら通常投稿に自動切替)</p>
+    </div>` : ''}
     ${imageUrls.length ? `<div class="flex gap-2">${imageUrls.map((u) => `<img src="${esc(u)}" alt="添付図解" class="h-32 rounded-lg border border-slate-200 object-cover cursor-pointer" onclick="window.open('${esc(u)}', '_blank')">`).join('')}<span class="text-[10px] text-slate-400 self-end">🎨 Aki生成図解(クリックで拡大)</span></div>` : ''}
     ${issues.length ? `<div class="bg-amber-50 border border-amber-200 rounded-lg p-2 text-xs text-amber-800">${issues.map((i) => `<div><b>[${esc(i.rule)}]</b> ${esc(i.detail)}</div>`).join('')}</div>` : ''}
     ${isAffiliateSlot ? `<button class="embed-affiliate-btn w-full bg-brand-orange/10 text-brand-orange border border-brand-orange/40 py-1.5 rounded-lg text-xs font-bold hover:bg-brand-orange/20" data-id="${esc(p.post_id)}"><i class="fas fa-link mr-1"></i>アフィリンクを自動埋め込み</button>` : ''}
@@ -556,6 +564,7 @@ async function renderKPI() {
   try { analyses = (await axios.get('/api/reports/analysis')).data; } catch (e) {}
   const latestDaily = analyses.daily?.[0];
   const latestWeekly = analyses.weekly?.[0];
+  const latestMonthly = analyses.monthly?.[0];
   let weeklyProposals = [];
   try { weeklyProposals = JSON.parse(latestWeekly?.proposals_json || '[]'); } catch (e) {}
 
@@ -575,9 +584,14 @@ async function renderKPI() {
       <canvas id="kpi-chart" height="110"></canvas>
     </div>
 
-    ${latestDaily || latestWeekly ? `
+    ${latestDaily || latestWeekly || latestMonthly ? `
     <section id="rui-analysis" class="space-y-4">
       <h2 class="font-bold text-lg text-brand-navy"><span class="text-xl mr-1">📊</span>Ruiの分析レポート</h2>
+      ${latestMonthly ? `
+      <div class="bg-white rounded-xl shadow p-4 border-l-4 border-purple-500">
+        <h3 class="font-bold text-brand-navy mb-2">月次レポート(30日総括+来月戦略) <span class="text-xs text-slate-400 font-normal ml-2">${esc(latestMonthly.report_date)}</span></h3>
+        <div class="text-sm whitespace-pre-wrap leading-relaxed text-slate-700 max-h-80 overflow-y-auto">${esc(latestMonthly.body_md)}</div>
+      </div>` : ''}
       ${latestWeekly ? `
       <div class="bg-white rounded-xl shadow p-4 border-l-4 border-brand-orange">
         <div class="flex items-center justify-between mb-2">

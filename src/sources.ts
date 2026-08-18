@@ -155,3 +155,138 @@ export async function collectReddit(maxPerSub = 5): Promise<{ items: RawItem[]; 
   })
   return { items, errors }
 }
+
+// ============================================================
+// 日本語の話題ツイート収集 (Yahoo!リアルタイム検索経由・無料)
+// ============================================================
+
+export interface JaHotTweet {
+  tweetId: string
+  url: string          // 引用元URL (utm除去済み)
+  author: string       // 表示名
+  screenName: string   // @なし
+  text: string         // 本文
+  rtCount: number
+  replyCount: number
+  score: number        // rt*2 + reply
+  keyword: string      // ヒットした検索語
+  createdAt: number    // unix秒
+}
+
+// 検索キーワード(日替わりで4語ローテーション)
+export const JA_TWEET_KEYWORDS = [
+  'AI副業',
+  '生成AI 稼ぐ',
+  'ChatGPT 活用術',
+  'AIツール 便利',
+  'note 収益化',
+  'AI 自動化 仕事',
+  'Claude 活用',
+  'AI画像生成 副業',
+]
+
+function stripYahooMarkers(s: string): string {
+  return s.replace(/\tSTART\t/g, '').replace(/\tEND\t/g, '').replace(/\t/g, ' ').trim()
+}
+
+// スパム・挨拶投稿の除外(引用価値のない投稿)
+function isQuoteWorthy(t: JaHotTweet): boolean {
+  const txt = t.text
+  if (txt.length < 40) return false                          // 短すぎる
+  if (/フォロバ|フォローありがとう|フォロー(お願い|して)/.test(txt)) return false
+  if (/^@\w+/.test(txt)) return false                        // リプライ
+  if (/(LINE|公式ライン|プレゼント配布|無料配布|DM(ください|で))/.test(txt) && /登録|追加|受け取/.test(txt)) return false // リスト誘導系
+  if ((txt.match(/#/g) || []).length >= 5) return false      // ハッシュタグ乱打
+  return true
+}
+
+// 1キーワード分の検索結果からツイートを抽出
+async function fetchYahooRealtime(keyword: string): Promise<JaHotTweet[]> {
+  const url = `https://search.yahoo.co.jp/realtime/search?p=${encodeURIComponent(keyword)}&md=t`
+  const res = await fetchWithTimeout(url, {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+    'Accept-Language': 'ja,en;q=0.8',
+  })
+  if (!res) throw new Error(`fetch failed: ${keyword}`)
+  const html = await res.text()
+  const m = html.match(/window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]*?\})\s*;?\s*<\/script>/)
+    || html.match(/<script id="__NEXT_DATA__"[^>]*>(\{[\s\S]*?\})<\/script>/)
+  if (!m) throw new Error(`state JSON not found: ${keyword}`)
+  const state = JSON.parse(m[1])
+
+  // ネスト内の entry 配列を探索
+  const findEntries = (obj: any, depth = 0): any[] | null => {
+    if (depth > 8 || obj === null || typeof obj !== 'object') return null
+    if (Array.isArray(obj.entry) && obj.entry.length > 0 && obj.entry[0]?.id) return obj.entry
+    for (const v of Object.values(obj)) {
+      const r = findEntries(v, depth + 1)
+      if (r) return r
+    }
+    return null
+  }
+  const entries = findEntries(state) || []
+  return entries
+    .filter((e: any) => e.id && e.displayText && e.screenName)
+    .map((e: any): JaHotTweet => {
+      const rt = Number(e.rtCount || 0)
+      const rep = Number(e.replyCount || 0)
+      return {
+        tweetId: String(e.id),
+        url: `https://x.com/${e.screenName}/status/${e.id}`,
+        author: stripYahooMarkers(String(e.name || e.screenName)),
+        screenName: String(e.screenName),
+        text: stripYahooMarkers(String(e.displayText)),
+        rtCount: rt,
+        replyCount: rep,
+        score: rt * 2 + rep,
+        keyword,
+        createdAt: Number(e.createdAt || 0),
+      }
+    })
+}
+
+// 引用RT候補を収集: 複数キーワード検索→フィルタ→スコア順
+// minScore: 最低バズ度(rt*2+reply)。届かない場合は空を返し通常投稿にフォールバック
+export async function collectJaHotTweets(minScore = 6): Promise<{ candidates: JaHotTweet[]; errors: string[] }> {
+  const errors: string[] = []
+  const all: JaHotTweet[] = []
+  // 日替わりで4キーワード選択(全部叩くと重い+アクセス集中を避ける)
+  const dayIndex = Math.floor(Date.now() / 86400000)
+  const picked: string[] = []
+  for (let i = 0; i < 4; i++) picked.push(JA_TWEET_KEYWORDS[(dayIndex + i * 3) % JA_TWEET_KEYWORDS.length])
+
+  for (const kw of picked) {
+    try {
+      const tweets = await fetchYahooRealtime(kw)
+      all.push(...tweets)
+      await new Promise((r) => setTimeout(r, 800)) // アクセス間隔
+    } catch (e: any) {
+      errors.push(`Yahoo検索「${kw}」: ${e?.message || 'error'}`)
+    }
+  }
+
+  // 24時間以内 + 引用価値フィルタ + 重複除去 + スコア順
+  const dayAgo = Date.now() / 1000 - 86400
+  const seen = new Set<string>()
+  const candidates = all
+    .filter((t) => t.createdAt > dayAgo && t.score >= minScore && isQuoteWorthy(t))
+    .filter((t) => (seen.has(t.tweetId) ? false : (seen.add(t.tweetId), true)))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10)
+
+  return { candidates, errors }
+}
+
+// 投稿直前の生存確認 (X公式oEmbed・認証不要)
+export async function verifyTweetAlive(tweetId: string, screenName: string): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(
+      `https://publish.twitter.com/oembed?url=${encodeURIComponent(`https://twitter.com/${screenName}/status/${tweetId}`)}&omit_script=1`,
+    )
+    if (!res) return false
+    const data: any = await res.json()
+    return !!data?.html
+  } catch {
+    return false
+  }
+}

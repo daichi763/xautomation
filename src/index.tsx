@@ -5,9 +5,10 @@ import { embedAffiliateLinks, suggestAnnotations, type AffiliateLink, type Gloss
 import { computeCostPlan } from './model-plan'
 import { callOpenAI, YUTO_SYSTEM, MIO_SYSTEM } from './llm'
 import { buildImagePrompt, generateImage, qaImage, IMAGE_SIZE, IMAGE_COST_USD, type ImagePurpose } from './image-gen'
-import { getXCredentials, postTweet, uploadMedia } from './x-api'
+import { getXCredentials } from './x-api'
 import { runRikoCrawl } from './riko'
-import { runDailyPipeline, SLOT_TABLE } from './cron'
+import { runDailyPipeline, runHourlyTick, SLOT_TABLE } from './cron'
+import { publishPostToX } from './sora'
 import { runNanaReport } from './nana'
 import { getAuthState, registerUser, loginUser, logoutUser, sessionCookie, clearSessionCookie, parseSessionCookie, ALLOWED_EMAILS } from './auth'
 
@@ -416,30 +417,14 @@ app.post('/api/posts/:id/publish-x', async (c) => {
   if (post.qa_status === 'ng') return c.json({ error: 'QA判定NGの投稿は公開できません' }, 400)
   if (post.published_at) return c.json({ error: 'すでに公開済みです' }, 400)
 
-  // 紐付く画像があればアップロード (QA通過分のみ)
-  let mediaIds: string[] = []
-  const img: any = await DB.prepare("SELECT * FROM generated_images WHERE post_id = ? AND qa_status = 'ok' ORDER BY created_at DESC LIMIT 1").bind(id).first()
-  if (img) {
-    const obj = await R2.get(img.r2_key)
-    if (obj) {
-      const buf = await obj.arrayBuffer()
-      const bytes = new Uint8Array(buf)
-      let b64 = ''
-      const chunk = 0x8000
-      for (let i = 0; i < bytes.length; i += chunk) b64 += String.fromCharCode(...bytes.subarray(i, i + chunk))
-      const up = await uploadMedia(creds, btoa(b64))
-      if (up.ok && up.mediaId) mediaIds = [up.mediaId]
-    }
-  }
-
-  const result = await postTweet(creds, post.body, mediaIds.length ? mediaIds : undefined)
+  // 共通投稿ロジック (画像添付+引用RT+生存確認込み)
+  const result = await publishPostToX(DB, R2, creds, post)
   if (!result.ok) return c.json({ error: `X投稿失敗: ${result.error}` }, 502)
 
-  await DB.prepare("UPDATE x_posts SET published_at = datetime('now'), buffer_id = ? WHERE post_id = ?").bind(result.tweetId, id).run()
   await DB.prepare("INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('sora', 'x_publish', 'success', ?, CURRENT_TIMESTAMP)")
-    .bind(`Xへ投稿完了: ${result.tweetUrl}`).run()
+    .bind(`Xへ投稿完了: ${result.tweetUrl}${result.quoted ? ' (引用RT)' : ''}`).run()
 
-  return c.json({ ok: true, tweet_id: result.tweetId, tweet_url: result.tweetUrl, with_image: mediaIds.length > 0 })
+  return c.json({ ok: true, tweet_id: result.tweetId, tweet_url: result.tweetUrl, with_image: result.withImage, quoted: result.quoted })
 })
 
 // 既存投稿をYutoにリライトさせる(QA指摘を反映)
@@ -639,7 +624,7 @@ app.post('/api/riko/crawl', async (c) => {
 app.get('/api/cron/status', async (c) => {
   const { DB } = c.env
   const logs = await DB.prepare(
-    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'auto_note', 'daily_analysis', 'weekly_analysis', 'daily_report') ORDER BY id DESC LIMIT 16"
+    "SELECT worker_name, action, status, output_json, finished_at FROM worker_logs WHERE action IN ('auto_crawl', 'auto_translate', 'auto_write', 'auto_qa', 'manual_crawl', 'pipeline_run', 'weekly_plan', 'auto_infographic', 'auto_note', 'daily_analysis', 'weekly_analysis', 'monthly_analysis', 'daily_report', 'quote_crawl', 'auto_publish') ORDER BY id DESC LIMIT 18"
   ).all()
   return c.json({
     secretConfigured: !!c.env.CRON_SECRET,
@@ -657,7 +642,8 @@ app.post('/api/cron/run', async (c) => {
   const provided = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (provided !== secret) return c.json({ error: 'unauthorized' }, 401)
 
-  const result = await runDailyPipeline(c.env.DB, c.env.R2, c.env.OPENAI_API_KEY || '')
+  // 毎時tick: JST5時台はフルパイプライン、それ以外は時刻到来分の自動投稿のみ
+  const result = await runHourlyTick(c.env.DB, c.env.R2, c.env as any)
   return c.json(result)
 })
 
@@ -677,7 +663,8 @@ app.get('/api/reports/analysis', async (c) => {
   const { DB } = c.env
   const daily = await DB.prepare("SELECT * FROM analysis_reports WHERE report_type = 'daily' ORDER BY created_at DESC LIMIT 3").all()
   const weekly = await DB.prepare("SELECT * FROM analysis_reports WHERE report_type = 'weekly' ORDER BY created_at DESC LIMIT 2").all()
-  return c.json({ daily: daily.results, weekly: weekly.results })
+  const monthly = await DB.prepare("SELECT * FROM analysis_reports WHERE report_type = 'monthly' ORDER BY created_at DESC LIMIT 2").all()
+  return c.json({ daily: daily.results, weekly: weekly.results, monthly: monthly.results })
 })
 
 // Alex週次計画
@@ -691,6 +678,13 @@ app.get('/api/plans/weekly', async (c) => {
 app.post('/api/reports/daily/run', async (c) => {
   const result = await runNanaReport(c.env.DB, c.env.OPENAI_API_KEY || '')
   return c.json(result, result.ok ? 200 : 502)
+})
+
+// 引用RT候補のプレビュー(今日の話題ツイート収集を即時実行)
+app.get('/api/quote/candidates', async (c) => {
+  const { collectJaHotTweets } = await import('./sources')
+  const result = await collectJaHotTweets(6)
+  return c.json(result)
 })
 
 // Rui日次分析を手動実行(デバッグ/即時確認用)

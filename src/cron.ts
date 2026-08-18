@@ -8,8 +8,10 @@ import { runQaCheck } from './qa-rules'
 import { runAlexWeeklyPlan, getCurrentWeekPlan } from './alex'
 import { runNoteWriter, todayNoteType } from './note-writer'
 import { runAkiInfographic } from './aki'
-import { runRuiDaily, runRuiWeekly } from './rui'
+import { runRuiDaily, runRuiWeekly, runRuiMonthly } from './rui'
 import { runNanaReport } from './nana'
+import { collectJaHotTweets, type JaHotTweet } from './sources'
+import { runSoraScheduledPublish, type SoraPublishResult } from './sora'
 
 // 指示書§05 12枠タイムテーブル
 export const SLOT_TABLE: { slot: number; time: string; type: string; limit: string }[] = [
@@ -34,7 +36,7 @@ const SLOT_HINTS: Record<number, string> = {
   3: '図解画像を添付する前提の短文。図解の内容を要約する導入文',
   4: '5〜8連スレッド形式。「1/」「2/」の番号付き。各140字以内。最初のツイートにフックを',
   5: '昼休みに読める軽いTips。専門知識ゼロでも答えられる問いかけを含めても良い',
-  6: '海外の話題ツイートを引用RTする想定のコメント。100字以内',
+  6: '話題ツイートを引用RTするコメント。100字以内',
   7: '海外の成功/失敗事例を分解。「何が要因か」を僕の視点で',
   8: 'ツール比較。アフィリエイトリンク想定のため文末に #PR を明記',
   9: '読者への質問で終える。専門知識ゼロでも答えられる普遍的な問い',
@@ -66,7 +68,8 @@ export interface PipelineResult {
   yuto: { postsCreated: number; costUsd: number; errors: string[] }
   aki: { generated: boolean; qaStatus?: string; costUsd: number; error?: string }
   note: { created: boolean; type?: string; title?: string; costUsd: number; error?: string }
-  rui: { daily: boolean; weekly: boolean; costUsd: number; errors: string[] }
+  quote: { found: boolean; author?: string; score?: number; errors: string[] }
+  rui: { daily: boolean; weekly: boolean; monthly: boolean; costUsd: number; errors: string[] }
   nana: { reported: boolean; costUsd: number; error?: string }
   mio: { checked: number; ok: number; needsFix: number; ng: number }
   totalCostUsd: number
@@ -88,7 +91,8 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
     yuto: { postsCreated: 0, costUsd: 0, errors: [] },
     aki: { generated: false, costUsd: 0 },
     note: { created: false, costUsd: 0 },
-    rui: { daily: false, weekly: false, costUsd: 0, errors: [] },
+    quote: { found: false, errors: [] },
+    rui: { daily: false, weekly: false, monthly: false, costUsd: 0, errors: [] },
     nana: { reported: false, costUsd: 0 },
     mio: { checked: 0, ok: 0, needsFix: 0, ng: 0 },
     totalCostUsd: 0,
@@ -161,9 +165,41 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
 
   let slot3Created: { postId: string; body: string; topicTitle: string } | null = null
 
+  // 枠6用: 日本語の話題ツイートを収集(Yahoo!リアルタイム検索・無料)。見つからなければ従来型にフォールバック
+  let quoteTarget: JaHotTweet | null = null
+  try {
+    const hot = await collectJaHotTweets(6)
+    result.quote.errors = hot.errors
+    // 過去に引用済みのツイートは除外
+    for (const cand of hot.candidates) {
+      const used = await db.prepare('SELECT post_id FROM x_posts WHERE quote_tweet_id = ? LIMIT 1').bind(cand.tweetId).first()
+      if (!used) { quoteTarget = cand; break }
+    }
+    if (quoteTarget) {
+      result.quote.found = true
+      result.quote.author = `@${quoteTarget.screenName}`
+      result.quote.score = quoteTarget.score
+    }
+    await logWorker(db, 'sora', 'quote_crawl', true, { candidates: hot.candidates.length, picked: quoteTarget ? `@${quoteTarget.screenName} (score=${quoteTarget.score})` : 'なし(通常投稿へ)', errors: hot.errors.slice(0, 2) })
+  } catch (e: any) {
+    result.quote.errors.push(e?.message || '話題ツイート収集エラー')
+  }
+
   for (const slotDef of SLOT_TABLE) {
     const { topic, markdown } = translations[(slotDef.slot - 1) % translations.length]
-    const userPrompt = `以下のKai(翻訳担当)の翻訳要約をもとに、「枠${slotDef.slot}: ${slotDef.type}(${slotDef.time}投稿 / ${slotDef.limit})」のX投稿を1本執筆してください。
+    const isQuoteSlot = slotDef.slot === 6 && quoteTarget !== null
+    const userPrompt = isQuoteSlot
+      ? `以下の日本語の話題ツイートを引用リツイートするコメントを1本執筆してください(枠6: 引用RT / 14:00投稿 / 100字以内)。
+
+▓引用元ツイート(@${quoteTarget!.screenName} / ${quoteTarget!.author}):
+${quoteTarget!.text.slice(0, 500)}
+
+▓執筆ルール:
+- 原文に「僕の視点での気づき・補足・実体験」を1つ添える(単なる同意やおうむ返しはNG)
+- 攻撃・皮肉・マウントは絶対NG。元投稿者への敬意を保つ
+- 引用元が消えても単体で意味が通る文にする
+- 100字以内。ハッシュタグは不要${todayFocus}`
+      : `以下のKai(翻訳担当)の翻訳要約をもとに、「枠${slotDef.slot}: ${slotDef.type}(${slotDef.time}投稿 / ${slotDef.limit})」のX投稿を1本執筆してください。
 
 ▓枠の型: ${SLOT_HINTS[slotDef.slot]}
 
@@ -210,10 +246,21 @@ ${glossaryNote}${todayFocus}`
     try {
       await db
         .prepare(
-          `INSERT INTO x_posts (post_id, topic_id, slot_number, scheduled_at, body, approval_status, qa_status, qa_issues)
-           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
+          `INSERT INTO x_posts (post_id, topic_id, slot_number, scheduled_at, body, approval_status, qa_status, qa_issues, quote_tweet_id, quote_author, quote_text)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
         )
-        .bind(postId, topic.topic_id, slotDef.slot, nextScheduledAt(slotDef.time), body, qa.status, JSON.stringify(qa.issues))
+        .bind(
+          postId,
+          isQuoteSlot ? null : topic.topic_id,
+          slotDef.slot,
+          nextScheduledAt(slotDef.time),
+          body,
+          qa.status,
+          JSON.stringify(qa.issues),
+          isQuoteSlot ? quoteTarget!.tweetId : null,
+          isQuoteSlot ? `@${quoteTarget!.screenName}` : null,
+          isQuoteSlot ? quoteTarget!.text.slice(0, 500) : null,
+        )
         .run()
       result.yuto.postsCreated++
       if (slotDef.slot === 3) slot3Created = { postId, body, topicTitle: topic.title_ja }
@@ -267,6 +314,16 @@ ${glossaryNote}${todayFocus}`
       if (!ruiW.ok && ruiW.error) result.rui.errors.push(ruiW.error)
       await logWorker(db, 'rui', 'weekly_analysis', ruiW.ok, { reportId: ruiW.reportId, proposals: ruiW.proposals?.length || 0, costUsd: ruiW.costUsd, error: ruiW.error })
     }
+
+    // 毎月1日(JST): 月次振り返り+来月戦略(重複実行は関数側でガード)
+    const jstDate = new Date(Date.now() + 9 * 3600 * 1000).getUTCDate()
+    if (jstDate === 1) {
+      const ruiM = await runRuiMonthly(db, apiKey)
+      result.rui.monthly = ruiM.ok && !ruiM.error?.includes('スキップ')
+      result.rui.costUsd += ruiM.costUsd
+      if (!ruiM.ok && ruiM.error) result.rui.errors.push(ruiM.error)
+      if (result.rui.monthly) await logWorker(db, 'rui', 'monthly_analysis', true, { reportId: ruiM.reportId, costUsd: ruiM.costUsd })
+    }
   } catch (e: any) {
     result.rui.errors.push(e?.message || 'Rui実行エラー')
   }
@@ -285,5 +342,58 @@ ${glossaryNote}${todayFocus}`
     result.aki.costUsd + result.note.costUsd + result.rui.costUsd + result.nana.costUsd
   result.ok = result.yuto.postsCreated > 0
   if (!result.ok) result.error = 'Yuto執筆が全件失敗しました'
+  return result
+}
+
+// ============================================================
+// 毎時cronエントリ: 時間帯で処理を振り分け
+//  - JST 5時台: フルパイプライン(1日1回ガード付き)
+//  - 毎時: Sora自動予約投稿(承認済みの時刻到来分をXへ)
+// ============================================================
+export interface HourlyTickResult {
+  ok: boolean
+  mode: 'pipeline' | 'publish_only'
+  pipeline?: PipelineResult
+  sora: SoraPublishResult
+  error?: string
+}
+
+export async function runHourlyTick(
+  db: D1Database,
+  r2: R2Bucket,
+  env: Record<string, string | undefined>,
+): Promise<HourlyTickResult> {
+  const jstHour = new Date(Date.now() + 9 * 3600 * 1000).getUTCHours()
+  const jstToday = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)
+  const result: HourlyTickResult = {
+    ok: true,
+    mode: 'publish_only',
+    sora: { ok: true, published: 0, skippedNoCreds: false, details: [], errors: [] },
+  }
+
+  // JST 5時台のみパイプライン(同日重複実行ガード: 今日分のauto_write成功ログがあればスキップ)
+  if (jstHour === 5) {
+    const already = await db
+      .prepare(
+        `SELECT id FROM worker_logs
+         WHERE worker_name = 'yuto' AND action = 'auto_write' AND status = 'success'
+           AND date(finished_at, '+9 hours') = ? LIMIT 1`,
+      )
+      .bind(jstToday).first()
+    if (!already) {
+      result.mode = 'pipeline'
+      result.pipeline = await runDailyPipeline(db, r2, String(env.OPENAI_API_KEY || ''))
+      result.ok = result.pipeline.ok
+      if (!result.pipeline.ok) result.error = result.pipeline.error
+    }
+  }
+
+  // 毎時: 時刻到来分の自動投稿(Xキー未設定なら何もしない)
+  try {
+    result.sora = await runSoraScheduledPublish(db, r2, env)
+  } catch (e: any) {
+    result.sora.errors.push(e?.message || 'Sora実行エラー')
+  }
+
   return result
 }

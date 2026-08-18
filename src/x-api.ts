@@ -72,13 +72,14 @@ export interface XPostResult {
   error?: string
 }
 
-// テキスト投稿 (画像付きの場合は事前にuploadMediaでmedia_id取得)
-export async function postTweet(creds: XCredentials, text: string, mediaIds?: string[]): Promise<XPostResult> {
+// テキスト投稿 (画像付きは事前にuploadMediaでmedia_id取得 / quoteTweetIdで引用RT)
+export async function postTweet(creds: XCredentials, text: string, mediaIds?: string[], quoteTweetId?: string): Promise<XPostResult> {
   const url = 'https://api.twitter.com/2/tweets'
   try {
     const auth = await buildOAuthHeader(creds, 'POST', url)
     const body: any = { text }
     if (mediaIds?.length) body.media = { media_ids: mediaIds }
+    if (quoteTweetId) body.quote_tweet_id = quoteTweetId
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
