@@ -4,7 +4,7 @@
 //  2. publishApprovedReplies: 承認済み返信を自動送信($0.015/件)
 // X APIキー未設定時は何もしない (エラーにしない)
 
-import { getXCredentials, fetchMyProfile, fetchMyMentions, postTweet, xWeightedLength, X_WEIGHT_LIMIT, type XCredentials, type XMention } from './x-api'
+import { getXCredentials, fetchMyProfile, fetchMyMentions, postTweet, xWeightedLength, X_WEIGHT_LIMIT, isTransientXError, type XCredentials, type XMention } from './x-api'
 import { callOpenAI } from './llm'
 import { runQaCheck } from './qa-rules'
 
@@ -240,7 +240,7 @@ export async function publishApprovedReplies(
         // 恒久エラー(リトライしても解決しない)は rejected にして無限リトライを防ぐ。
         // 一時的エラー(レート制限・5xx・ネットワーク)のみ次回リトライに残す。
         const err = post.error || ''
-        const isTransient = /rate limit|too many requests|429|50[0-9]|service unavailable|timeout|ネットワークエラー/i.test(err)
+        const isTransient = isTransientXError(err)
         if (!isTransient) {
           await db.prepare("UPDATE x_replies SET approval_status = 'rejected' WHERE reply_id = ?").bind(r.reply_id).run()
         }

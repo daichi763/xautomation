@@ -101,6 +101,14 @@ export function xWeightedLength(text: string): number {
 
 export const X_WEIGHT_LIMIT = 280
 
+// 一時的エラー判定(共通): 一時的なら次回リトライに残す、恒久ならrejected化する
+// - 日本語/英語両方のネットワークエラーメッセージに対応(Workers実環境のfetch例外は英語)
+// - HTTPステータス系は単語境界で判定(文中の数値への誤マッチ防止)
+export function isTransientXError(error: string | undefined): boolean {
+  const err = error || ''
+  return /rate limit|too many requests|service unavailable|timeout|timed out|network|fetch failed|connection|aborted|socket|ECONNRESET|ETIMEDOUT|internal server error|ネットワークエラー|\b429\b|\b50[0-9]\b/i.test(err)
+}
+
 /**
  * 長文をスレッド用に分割する。
  * - 「1/」「2/」「1/n」等の番号付き行(Yutoのスレッド形式)があればそこで分割
@@ -202,7 +210,9 @@ export async function retweet(creds: XCredentials, userId: string, tweetId: stri
       const detail = data?.detail || data?.errors?.[0]?.message || data?.title || `HTTP ${res.status}`
       return { ok: false, error: detail }
     }
-    return { ok: !!data.data?.retweeted }
+    // 200でも retweeted=false の場合があるため error を返して無音失敗を防ぐ
+    const retweeted = !!data.data?.retweeted
+    return { ok: retweeted, error: retweeted ? undefined : 'APIは200を返しましたが retweeted=false でした(既にRT済みの可能性)' }
   } catch (e: any) {
     return { ok: false, error: e?.message || 'ネットワークエラー' }
   }

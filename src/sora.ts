@@ -4,7 +4,7 @@
 // - 枠6: quote_tweet_id があれば引用RT (投稿直前に生存確認、消えていれば通常投稿)
 // - X APIキー未設定時は何もしない (エラーにしない)
 
-import { getXCredentials, postTweet, postThread, uploadMedia, xWeightedLength, X_WEIGHT_LIMIT, type XCredentials } from './x-api'
+import { getXCredentials, postTweet, postThread, uploadMedia, xWeightedLength, X_WEIGHT_LIMIT, isTransientXError, type XCredentials } from './x-api'
 import { verifyTweetAlive } from './sources'
 
 export interface SoraPublishResult {
@@ -110,9 +110,15 @@ export async function runSoraScheduledPublish(
         ).bind(`枠${post.slot_number}を自動投稿: ${r.tweetUrl}${r.quoted ? ' (引用RT)' : ''}${r.threaded ? ` (スレッド${r.threadCount}連)` : ''}`).run()
       } else {
         result.errors.push(`枠${post.slot_number}: ${r.error}`)
+        // 恒久エラー(重複コンテンツ等)は rejected に戻して毎時リトライを止める。
+        // 一時的エラー(レート制限・5xx・ネットワーク)のみ次回リトライに残す(24hウィンドウ内)。
+        const isTransient = isTransientXError(r.error)
+        if (!isTransient) {
+          await db.prepare("UPDATE x_posts SET approval_status = 'rejected' WHERE post_id = ?").bind(post.post_id).run()
+        }
         await db.prepare(
           "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('sora', 'auto_publish', 'error', ?, CURRENT_TIMESTAMP)",
-        ).bind(`枠${post.slot_number}の投稿失敗: ${r.error}`).run()
+        ).bind(`枠${post.slot_number}の投稿失敗: ${r.error}${isTransient ? '(次回リトライ)' : '(承認取消 — 内容を確認して再承認してください)'}`).run()
       }
       await new Promise((resolve) => setTimeout(resolve, 1500)) // レートリミット配慮
     } catch (e: any) {

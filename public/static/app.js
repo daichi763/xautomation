@@ -31,6 +31,19 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 }
 
+// Xのweighted文字数(サーバ側 xWeightedLength と同じロジック): CJK=2, ASCII=1, URL=23固定、上陥0280
+const X_WEIGHT_LIMIT = 280;
+function xWeightedLength(text) {
+  let weight = 0;
+  const withoutUrls = String(text || '').replace(/https?:\/\/[^\s]+/g, () => { weight += 23; return ''; });
+  for (const ch of withoutUrls) {
+    const cp = ch.codePointAt(0) || 0;
+    if ((cp >= 0x0000 && cp <= 0x10ff) || (cp >= 0x2000 && cp <= 0x200d) || (cp >= 0x2010 && cp <= 0x201f) || (cp >= 0x2032 && cp <= 0x2037)) weight += 1;
+    else weight += 2;
+  }
+  return weight;
+}
+
 function toast(msg, type = 'success') {
   const el = document.createElement('div');
   el.className = `fade-in px-4 py-3 rounded-lg shadow-lg text-white text-sm ${type === 'success' ? 'bg-emerald-600' : 'bg-red-600'}`;
@@ -420,13 +433,33 @@ async function renderApprove() {
     btn.addEventListener('click', async () => {
       const { id, decision } = btn.dataset;
       try {
-        await axios.post(`/api/replies/${id}/decision`, { decision });
+        const payload = { decision };
+        // 承認時: 編集欄の内容が元の下書きと違えば編集本文として送信
+        if (decision === 'approved') {
+          const ta = document.querySelector(`.reply-edit-body[data-id="${CSS.escape(id)}"]`);
+          if (ta && ta.value.trim() && ta.value.trim() !== (ta.dataset.original || '')) payload.body = ta.value.trim();
+        }
+        await axios.post(`/api/replies/${id}/decision`, payload);
         toast(decision === 'approved' ? '返信を承認しました(次の自動サイクルで送信)' : '返信を却下しました');
         renderApprove();
       } catch (e) {
         toast(e?.response?.data?.error || '処理に失敗しました', 'error');
       }
     });
+  });
+
+  // 返信編集欄: 入力のたびにweighted文字数を更新(280超は赤表示)
+  document.querySelectorAll('.reply-edit-body').forEach((ta) => {
+    const counter = document.querySelector(`.reply-char-count[data-id="${CSS.escape(ta.dataset.id)}"]`);
+    const update = () => {
+      if (!counter) return;
+      const w = xWeightedLength(ta.value);
+      counter.textContent = `${w}/280`;
+      counter.classList.toggle('text-red-500', w > X_WEIGHT_LIMIT);
+      counter.classList.toggle('text-slate-400', w <= X_WEIGHT_LIMIT);
+    };
+    ta.addEventListener('input', update);
+    update();
   });
   bindDecisionButtons();
 }
@@ -443,8 +476,11 @@ function replyCard(r) {
       <p class="whitespace-pre-wrap">${esc((r.mention_text || '').slice(0, 200))}</p>
     </div>
     <div class="text-sm">
-      <p class="text-xs font-bold text-slate-400 mb-1">Soraの返信案:</p>
-      <p class="whitespace-pre-wrap leading-relaxed">${esc(r.draft_body)}</p>
+      <div class="flex items-center justify-between mb-1">
+        <p class="text-xs font-bold text-slate-400">Soraの返信案(編集できます):</p>
+        <span class="reply-char-count text-[10px] text-slate-400 font-mono" data-id="${esc(r.reply_id)}"></span>
+      </div>
+      <textarea class="reply-edit-body w-full border border-slate-200 rounded-lg p-2 text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-emerald-300 resize-y" rows="3" data-id="${esc(r.reply_id)}" data-original="${esc(r.draft_body)}">${esc(r.draft_body)}</textarea>
     </div>
     <div class="flex gap-2 pt-1">
       <button class="reply-decision-btn flex-1 bg-emerald-600 text-white py-1.5 rounded-lg text-xs font-bold hover:opacity-90" data-id="${esc(r.reply_id)}" data-decision="approved"><i class="fas fa-check mr-1"></i>承認(自動送信)</button>
