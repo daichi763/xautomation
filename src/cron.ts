@@ -66,6 +66,55 @@ async function logWorker(db: D1Database, worker: string, action: string, ok: boo
     .run()
 }
 
+// オフィス画面のワーカーアイコンと実処理を連動させる(失敗してもパイプラインは続行)
+export async function setWorkerWorking(db: D1Database, worker: string, task: string) {
+  try {
+    await db.prepare("UPDATE worker_status SET status = 'working', current_task = ?, last_updated = CURRENT_TIMESTAMP WHERE worker_name = ?")
+      .bind(task, worker).run()
+  } catch { /* 表示用なので失敗は無視 */ }
+}
+
+export async function setWorkerIdle(db: D1Database, worker: string) {
+  try {
+    await db.prepare("UPDATE worker_status SET status = 'idle', current_task = '待機中', last_updated = CURRENT_TIMESTAMP WHERE worker_name = ?")
+      .bind(worker).run()
+  } catch { /* 表示用なので失敗は無視 */ }
+}
+
+async function resetAllWorkersIdle(db: D1Database) {
+  try {
+    await db.prepare("UPDATE worker_status SET status = 'idle', current_task = '待機中', last_updated = CURRENT_TIMESTAMP").run()
+  } catch { /* 表示用なので失敗は無視 */ }
+}
+
+// 二重実行ガード: app_settingsの実行中フラグ(20分で自動失効 — 異常終了でフラグが残っても復旧可能)
+const PIPELINE_LOCK_KEY = 'pipeline_running_at'
+const PIPELINE_LOCK_STALE_MS = 20 * 60 * 1000
+
+export async function acquirePipelineLock(db: D1Database): Promise<{ acquired: boolean; runningSinceMs?: number }> {
+  try {
+    const row: any = await db.prepare('SELECT value FROM app_settings WHERE key = ?').bind(PIPELINE_LOCK_KEY).first()
+    if (row?.value) {
+      const startedAt = Date.parse(row.value)
+      if (!Number.isNaN(startedAt) && Date.now() - startedAt < PIPELINE_LOCK_STALE_MS) {
+        return { acquired: false, runningSinceMs: Date.now() - startedAt }
+      }
+    }
+    await db.prepare('INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)')
+      .bind(PIPELINE_LOCK_KEY, new Date().toISOString()).run()
+    return { acquired: true }
+  } catch {
+    // ロック取得自体の障害でパイプラインを止めない(ガードなしで続行)
+    return { acquired: true }
+  }
+}
+
+export async function releasePipelineLock(db: D1Database) {
+  try {
+    await db.prepare('DELETE FROM app_settings WHERE key = ?').bind(PIPELINE_LOCK_KEY).run()
+  } catch { /* 次回は20分で自動失効するので継続可 */ }
+}
+
 export interface PipelineResult {
   ok: boolean
   kpi: { collected: boolean; xFollowers?: number; noteFollowers?: number; errors: string[] }
@@ -94,8 +143,43 @@ function jstDay(): number {
   return new Date(Date.now() + 9 * 3600 * 1000).getUTCDay()
 }
 
-// フルパイプライン実行(朝1回)
+// フルパイプライン実行(朝1回) — 二重実行ガード+ワーカー状態リセット付きラッパー
 export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: string, env?: Record<string, string | undefined>): Promise<PipelineResult> {
+  const lock = await acquirePipelineLock(db)
+  if (!lock.acquired) {
+    const mins = Math.max(1, Math.round((lock.runningSinceMs || 0) / 60000))
+    return {
+      ok: false,
+      error: `パイプラインは既に実行中です(約${mins}分前に開始。所要約5〜10分)。完了をお待ちください。`,
+      kpi: { collected: false, errors: [] },
+      alex: { ran: false, costUsd: 0 },
+      riko: { collected: 0, inserted: 0, costUsd: 0, errors: [] },
+      competitor: { ran: false, collected: 0, costUsd: 0 },
+      kai: { translated: 0, costUsd: 0, errors: [] },
+      yuto: { postsCreated: 0, costUsd: 0, errors: [] },
+      aki: { planned: 0, generated: 0, attached: 0, qaFailed: 0, costUsd: 0 },
+      noteDiagrams: { generated: 0, costUsd: 0 },
+      note: { created: false, costUsd: 0 },
+      noteCover: { generated: false, costUsd: 0 },
+      monthlyNote: { created: false, costUsd: 0 },
+      quote: { found: false, errors: [] },
+      rui: { daily: false, weekly: false, monthly: false, costUsd: 0, errors: [] },
+      nana: { reported: false, costUsd: 0 },
+      mio: { checked: 0, ok: 0, needsFix: 0, ng: 0 },
+      slotOptimize: { ran: false, analyzed: 0, changes: [] },
+      recycle: { created: false, costUsd: 0 },
+      totalCostUsd: 0,
+    }
+  }
+  try {
+    return await runDailyPipelineInner(db, r2, apiKey, env)
+  } finally {
+    await releasePipelineLock(db)
+    await resetAllWorkersIdle(db) // 異常終了でもアイコンが「作業中」のまま固まらないように
+  }
+}
+
+async function runDailyPipelineInner(db: D1Database, r2: R2Bucket, apiKey: string, env?: Record<string, string | undefined>): Promise<PipelineResult> {
   const result: PipelineResult = {
     ok: false,
     kpi: { collected: false, errors: [] },
@@ -120,16 +204,20 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
 
   // ========== Phase -1: Nana KPI自動収集(Xフォロワー/noteフォロワー — 取れるものは全自動) ==========
   try {
+    await setWorkerWorking(db, 'nana', 'KPIを自動収集中(X/note)')
     const kpi = await collectKpiAuto(db, env || {})
     result.kpi = { collected: kpi.ok, xFollowers: kpi.xFollowers, noteFollowers: kpi.noteFollowers, errors: kpi.errors.slice(0, 3) }
     await logWorker(db, 'nana', 'kpi_collect', kpi.ok, { xFollowers: kpi.xFollowers, noteFollowers: kpi.noteFollowers, noteLikes: kpi.noteLikesTotal, sources: kpi.sources, errors: kpi.errors.slice(0, 3) })
   } catch (e: any) {
     result.kpi.errors.push(e?.message || 'KPI収集エラー')
+  } finally {
+    await setWorkerIdle(db, 'nana')
   }
 
   // ========== Phase -0.5: Riko 競合リサーチ(月曜・Alex計画の前に実行して材料にする) ==========
   if (jstDay() === 1) {
     try {
+      await setWorkerWorking(db, 'riko', '競合アカウントをリサーチ中')
       const comp = await runRikoCompetitorResearch(db, apiKey)
       result.competitor = { ran: comp.ok && !comp.error?.includes('スキップ'), collected: comp.collected, costUsd: comp.costUsd, error: comp.error }
       if (result.competitor.ran) await logWorker(db, 'riko', 'competitor_research', true, { collected: comp.collected, reportId: comp.reportId, costUsd: comp.costUsd })
@@ -142,6 +230,7 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
   try {
     const hasPlan = await getCurrentWeekPlan(db)
     if (jstDay() === 1 || !hasPlan) {
+      await setWorkerWorking(db, 'alex', '週次計画を立案中')
       const alex = await runAlexWeeklyPlan(db, apiKey)
       result.alex = { ran: alex.ok && !alex.error?.includes('スキップ'), theme: alex.theme, costUsd: alex.costUsd, error: alex.error }
       if (alex.ok && !alex.error) await logWorker(db, 'alex', 'weekly_plan', true, { theme: alex.theme, costUsd: alex.costUsd })
@@ -149,10 +238,14 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
     }
   } catch (e: any) {
     result.alex.error = e?.message
+  } finally {
+    await setWorkerIdle(db, 'alex')
   }
 
   // ========== Phase 1: Riko 巡回(10ネタ) ==========
+  await setWorkerWorking(db, 'riko', '海外ソース巡回中(Reddit/RSS)')
   const riko = await runRikoCrawl(db, apiKey)
+  await setWorkerIdle(db, 'riko')
   result.riko = { collected: riko.collected, inserted: riko.inserted, costUsd: riko.costUsd, errors: riko.errors.slice(0, 5) }
   await logWorker(db, 'riko', 'auto_crawl', riko.ok, { collected: riko.collected, inserted: riko.inserted, costUsd: riko.costUsd })
   if (!riko.ok || riko.topics.length === 0) {
@@ -162,6 +255,7 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
   }
 
   // ========== Phase 2: Kai 翻訳(上位4ネタ: urgency優先) ==========
+  await setWorkerWorking(db, 'kai', '一次情報を翻訳・要約中')
   const rank = { high: 0, medium: 1, low: 2 } as Record<string, number>
   const topTopics = [...riko.topics].sort((a, b) => (rank[a.urgency] ?? 1) - (rank[b.urgency] ?? 1)).slice(0, 4)
   const translations: { topic: any; markdown: string }[] = []
@@ -181,12 +275,15 @@ export async function runDailyPipeline(db: D1Database, r2: R2Bucket, apiKey: str
     }
   }
   await logWorker(db, 'kai', 'auto_translate', result.kai.translated > 0, { translated: result.kai.translated, costUsd: result.kai.costUsd, errors: result.kai.errors.slice(0, 3) })
+  await setWorkerIdle(db, 'kai')
   if (translations.length === 0) {
     result.error = 'Kai翻訳が全件失敗しました'
     return result
   }
 
   // ========== Phase 3: Yuto 執筆(12枠) + Phase 4: Mio QA ==========
+  await setWorkerWorking(db, 'yuto', 'X投稿12枠を執筆中')
+  await setWorkerWorking(db, 'mio', '執筆された投稿をQA審査中')
   const gl = await db.prepare('SELECT term, annotation FROM glossary LIMIT 30').all()
   const glossaryNote = ((gl.results || []) as any[]).map((g) => `※${g.term}=${g.annotation}`).join('\n')
 
@@ -382,15 +479,20 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
 
   await logWorker(db, 'yuto', 'auto_write', result.yuto.postsCreated > 0, { postsCreated: result.yuto.postsCreated, costUsd: result.yuto.costUsd, errors: result.yuto.errors.slice(0, 3) })
   await logWorker(db, 'mio', 'auto_qa', true, result.mio)
+  await setWorkerIdle(db, 'yuto')
+  await setWorkerIdle(db, 'mio')
 
   // ========== Phase 5: Aki 画像計画(全12枠を判定→必要な枠に生成・最大8枚) → Mio画像QA → 合格分のみ添付 ==========
   if (createdPosts.length > 0) {
     try {
+      await setWorkerWorking(db, 'aki', '図解画像を生成中(最大8枚)')
       const aki = await runAkiImagePlan(db, r2, apiKey, createdPosts, 8)
       result.aki = { planned: aki.planned, generated: aki.generated, attached: aki.attached, qaFailed: aki.qaFailed, costUsd: aki.costUsd, error: aki.error }
       await logWorker(db, 'aki', 'image_plan', aki.ok, { planned: aki.planned, generated: aki.generated, attached: aki.attached, qaFailed: aki.qaFailed, details: aki.details.slice(0, 10), costUsd: aki.costUsd, error: aki.error })
     } catch (e: any) {
       result.aki.error = e?.message
+    } finally {
+      await setWorkerIdle(db, 'aki')
     }
   }
 
@@ -412,6 +514,7 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
   let createdArticleId: string | null = null
   let createdArticleTitle = ''
   let createdArticleType = ''
+  await setWorkerWorking(db, 'yuto', 'note記事を執筆中')
   try {
     // note向きのネタ(翻訳済みの中で本日未使用のものを優先、なければ先頭)
     const noteTopic = translations[translations.length - 1] || translations[0]
@@ -450,6 +553,7 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
   // ========== Phase 6.6: Aki noteカバー画像生成(購入率・読了率向上) ==========
   if (createdArticleId) {
     try {
+      await setWorkerWorking(db, 'aki', 'noteカバー画像を生成中')
       const cover = await runAkiNoteCover(db, r2, apiKey, createdArticleId, createdArticleTitle, createdArticleType)
       result.noteCover = { generated: cover.ok, costUsd: cover.costUsd, error: cover.error }
       await logWorker(db, 'aki', 'note_cover', cover.ok, { imageId: cover.imageId, articleId: createdArticleId, qaStatus: cover.qaStatus, costUsd: cover.costUsd, error: cover.error })
@@ -473,7 +577,10 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
   }
 
   // ========== Phase 7: Rui 分析(毎日日次、日曜は週次も) ==========
+  await setWorkerIdle(db, 'yuto')
+  await setWorkerIdle(db, 'aki')
   try {
+    await setWorkerWorking(db, 'rui', '本日の投稿実績を分析中')
     const ruiD = await runRuiDaily(db, apiKey)
     result.rui.daily = ruiD.ok
     result.rui.costUsd += ruiD.costUsd
@@ -499,15 +606,20 @@ ${glossaryNote}${todayFocus}${saleMode && slotDef.slot === 2 ? '\n\n▓追加指
     }
   } catch (e: any) {
     result.rui.errors.push(e?.message || 'Rui実行エラー')
+  } finally {
+    await setWorkerIdle(db, 'rui')
   }
 
   // ========== Phase 8: Nana 日次レポート(最後に全体を集計) ==========
   try {
+    await setWorkerWorking(db, 'nana', '日次レポートを作成中')
     const nana = await runNanaReport(db, apiKey)
     result.nana = { reported: nana.ok, costUsd: nana.costUsd, error: nana.error }
     await logWorker(db, 'nana', 'daily_report', nana.ok, { reportId: nana.reportId, pending: nana.pendingCount, stale: nana.stalePending, costUsd: nana.costUsd, error: nana.error })
   } catch (e: any) {
     result.nana.error = e?.message
+  } finally {
+    await setWorkerIdle(db, 'nana')
   }
 
   result.totalCostUsd =
