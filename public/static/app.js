@@ -44,6 +44,18 @@ function xWeightedLength(text) {
   return weight;
 }
 
+function summarizeManualRun(api, d) {
+  if (d.skippedNoCreds || d.replies?.collect?.skippedNoCreds) return 'Xキー未設定のためスキップしました';
+  if (api === '/api/riko/crawl') return `${d.collected ?? 0}件収集 → ネタ${d.inserted ?? 0}件投入`;
+  if (api === '/api/pipeline/run') return `ネタ${d.riko?.inserted ?? 0}件 → 翻訳${d.kai?.translated ?? 0}本 → 投稿${d.yuto?.postsCreated ?? 0}本生成($${(d.totalCostUsd || 0).toFixed(3)})`;
+  if (api === '/api/sora/publish-due') return d.published > 0 ? `${d.published}件をXに投稿しました` : '時刻到来の投稿はありませんでした';
+  if (api === '/api/replies/collect') return `メンション${d.fetched ?? 0}件回収 → 返信案${d.drafted ?? 0}件生成(承認画面へ)`;
+  if (api === '/api/replies/publish') return d.published > 0 ? `${d.published}件の返信を送信しました` : '送信対象の承認済み返信はありませんでした';
+  if (api === '/api/selfrepost/run') return d.reposted ? `インプ${d.impressions ?? '-'}の投稿をセルフRTしました` : (d.error || '本日は対象なし(公開済み投稿なし or 実行済み)');
+  if (api === '/api/kpi/collect') return `KPI収集完了(Xフォロワー${d.xFollowers ?? '未取得'})`;
+  return '完了しました';
+}
+
 function toast(msg, type = 'success') {
   const el = document.createElement('div');
   el.className = `fade-in px-4 py-3 rounded-lg shadow-lg text-white text-sm ${type === 'success' ? 'bg-emerald-600' : 'bg-red-600'}`;
@@ -108,7 +120,19 @@ async function renderOffice() {
     <section id="office-floor">
       <div class="flex items-center justify-between mb-3">
         <h2 class="font-bold text-lg text-brand-navy"><i class="fas fa-building mr-2"></i>オフィスフロア</h2>
-        <button id="sim-btn" class="text-xs bg-brand-navy text-white px-3 py-1.5 rounded-lg hover:opacity-90"><i class="fas fa-rotate mr-1"></i>時間を進める(デモ)</button>
+      </div>
+      <div id="manual-run-panel" class="bg-white rounded-xl shadow p-3 mb-3">
+        <p class="text-xs font-bold text-brand-navy mb-2"><i class="fas fa-bolt mr-1 text-brand-orange"></i>手動実行（時間を待たずワーカーを今すぐ動かす）</p>
+        <div class="flex flex-wrap gap-2 text-xs">
+          <button class="manual-run-btn bg-brand-navy text-white px-3 py-1.5 rounded-lg hover:opacity-90" data-api="/api/riko/crawl" data-timeout="180000" data-label="Rikoネタ巡回" data-confirm="Rikoのネタ巡回を実行します（30〜60秒）。よろしいですか？"><i class="fas fa-satellite-dish mr-1"></i>Rikoネタ巡回</button>
+          <button class="manual-run-btn bg-brand-orange text-white px-3 py-1.5 rounded-lg hover:opacity-90" data-api="/api/pipeline/run" data-timeout="900000" data-label="フルパイプライン" data-confirm="フルパイプライン（Riko→Kai→Yuto→Mio）を実行します。5〜10分・約$0.2かかります。よろしいですか？"><i class="fas fa-robot mr-1"></i>フルパイプライン</button>
+          <button class="manual-run-btn bg-black text-white px-3 py-1.5 rounded-lg hover:opacity-80" data-api="/api/sora/publish-due" data-timeout="120000" data-label="予約分を今すぐ投稿" data-confirm="予約時刻が到来している承認済み投稿を今すぐXに送信します。よろしいですか？"><i class="fab fa-x-twitter mr-1"></i>予約分を今すぐ投稿</button>
+          <button class="manual-run-btn bg-sky-600 text-white px-3 py-1.5 rounded-lg hover:opacity-90" data-api="/api/replies/collect" data-timeout="180000" data-label="メンション回収" data-confirm="メンションを回収して返信案を生成します（X APIのRead課金が発生）。よろしいですか？"><i class="fas fa-at mr-1"></i>メンション回収</button>
+          <button class="manual-run-btn bg-emerald-600 text-white px-3 py-1.5 rounded-lg hover:opacity-90" data-api="/api/replies/publish" data-timeout="120000" data-label="承認済み返信を送信" data-confirm="承認済みの返信を今すぐ送信します。よろしいですか？"><i class="fas fa-reply mr-1"></i>承認済み返信を送信</button>
+          <button class="manual-run-btn bg-purple-600 text-white px-3 py-1.5 rounded-lg hover:opacity-90" data-api="/api/selfrepost/run" data-timeout="120000" data-label="セルフRT" data-confirm="今日の公開済み投稿からインプ上位をセルフRTします（1日1回まで）。よろしいですか？"><i class="fas fa-retweet mr-1"></i>セルフRT</button>
+          <button class="manual-run-btn bg-slate-600 text-white px-3 py-1.5 rounded-lg hover:opacity-90" data-api="/api/kpi/collect" data-timeout="120000" data-label="KPI収集" data-confirm="X/noteのKPIを今すぐ収集します（X APIのRead課金が発生）。よろしいですか？"><i class="fas fa-chart-line mr-1"></i>KPI収集</button>
+        </div>
+        <p id="manual-run-result" class="text-[11px] text-slate-500 mt-2"></p>
       </div>
       <div class="bg-gradient-to-br from-slate-200 to-slate-300 rounded-2xl p-5">
         <!-- 取締役デスク(上座) -->
@@ -197,10 +221,26 @@ async function renderOffice() {
   document.querySelectorAll('.worker-desk').forEach((el) => {
     el.addEventListener('click', () => openWorkerModal(el.dataset.worker));
   });
-  document.getElementById('sim-btn')?.addEventListener('click', async () => {
-    await axios.post('/api/simulate/tick');
-    toast('ワーカーの状態を更新しました');
-    if (currentView === 'office') renderOffice();
+  document.querySelectorAll('.manual-run-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (btn.dataset.confirm && !confirm(btn.dataset.confirm)) return;
+      const orig = btn.innerHTML;
+      btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>実行中...';
+      const resultEl = document.getElementById('manual-run-result');
+      try {
+        const { data } = await axios.post(btn.dataset.api, {}, { timeout: Number(btn.dataset.timeout || 120000) });
+        const summary = summarizeManualRun(btn.dataset.api, data);
+        toast(`${btn.dataset.label}: ${summary}`);
+        if (resultEl) resultEl.textContent = `✓ ${btn.dataset.label} — ${summary}`;
+        if (currentView === 'office') renderOffice();
+        updateApprovalBadge();
+      } catch (e) {
+        const msg = e.response?.data?.error || e.response?.data?.errors?.join(' / ') || e.message || '実行に失敗しました';
+        toast(`${btn.dataset.label}: ${msg}`, 'error');
+        if (resultEl) resultEl.textContent = `✗ ${btn.dataset.label} — ${msg}`;
+        btn.disabled = false; btn.innerHTML = orig;
+      }
+    });
   });
   document.getElementById('toggle-plan-btn')?.addEventListener('click', () => {
     document.getElementById('plan-detail')?.classList.toggle('hidden');

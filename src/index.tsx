@@ -7,8 +7,9 @@ import { callOpenAI, YUTO_SYSTEM, MIO_SYSTEM } from './llm'
 import { buildImagePrompt, generateImage, qaImage, IMAGE_SIZE, IMAGE_COST_USD, type ImagePurpose } from './image-gen'
 import { getXCredentials, xWeightedLength, X_WEIGHT_LIMIT } from './x-api'
 import { runRikoCrawl } from './riko'
-import { runDailyPipeline, runHourlyTick, SLOT_TABLE } from './cron'
-import { publishPostToX } from './sora'
+import { runDailyPipeline, runHourlyTick, runSelfRepost, SLOT_TABLE } from './cron'
+import { publishPostToX, runSoraScheduledPublish } from './sora'
+import { collectMentionsAndDraft, publishApprovedReplies } from './replies'
 import { runNanaReport } from './nana'
 import { getAuthState, registerUser, loginUser, logoutUser, sessionCookie, clearSessionCookie, parseSessionCookie, ALLOWED_EMAILS } from './auth'
 
@@ -775,50 +776,48 @@ app.get('/api/glossary', async (c) => {
 })
 
 // ============================================================
-// シミュレーション: ワーカー活動の擬似進行(デモ用)
-// 本番では Cron Triggers + LLM API がこの役割を担う
-// ============================================================
-
-const SIM_TASKS: Record<string, string[]> = {
-  alex: ['週次テーマをタスク分解中', 'KPI集計を指示中', '日次タスクをキュー投入中'],
-  riko: ['Reddit巡回 - r/SideHustle', 'YouTube新着チェック中', 'Product Hunt 巡回中', 'ネタ候補を選定中'],
-  kai: ['KDPスレッドを翻訳中', 'Indie Hackers記事を要約中', '一次情報を精読中'],
-  yuto: ['枠4スレッド執筆中', 'note有料記事を執筆中', '枠1速報を執筆中'],
-  aki: ['図解画像を生成中', 'noteアイキャッチ作成中', 'サムネのプロンプト設計中'],
-  sora: ['業界アカウント巡回中', 'Buffer予約投稿を設定中', 'エンゲージ数値を取得中'],
-  nana: ['日次レポート作成中', '承認リマインドを準備中', 'KPIを集計中'],
-  rui: ['本日の投稿を分析中', '週次改善提案を作成中', '伸びた投稿の仮説検証中'],
-  mio: ['本日分の投稿レビュー中', '引用URLの実在確認中', '禁止表現スキャン中']
-}
-
-app.post('/api/simulate/tick', async (c) => {
-  const { DB } = c.env
-  const workers = Object.keys(SIM_TASKS)
-  const updates: { worker: string; status: string; task: string }[] = []
-  for (const w of workers) {
-    const r = Math.random()
-    const status = r < 0.55 ? 'working' : r < 0.97 ? 'idle' : 'error'
-    const task = status === 'working'
-      ? SIM_TASKS[w][Math.floor(Math.random() * SIM_TASKS[w].length)]
-      : status === 'error' ? 'エラー: API応答なし(リトライ中)' : '待機中'
-    await DB.prepare('UPDATE worker_status SET status = ?, current_task = ?, last_updated = CURRENT_TIMESTAMP WHERE worker_name = ?')
-      .bind(status, task, w).run()
-    updates.push({ worker: w, status, task })
-  }
-  // ランダムでログも1件追加
-  const w = workers[Math.floor(Math.random() * workers.length)]
-  await DB.prepare("INSERT INTO worker_logs (worker_name, action, status, finished_at) VALUES (?, ?, 'success', CURRENT_TIMESTAMP)")
-    .bind(w, SIM_TASKS[w][Math.floor(Math.random() * SIM_TASKS[w].length)].replace('中', '完了')).run()
-  return c.json({ ok: true, updates })
-})
-
-// ============================================================
 // 全自動パイプライン: Riko→Kai→Yuto→Mio→ゲート②
 // ============================================================
 
 // 手動パイプライン実行(UIボタンから。認証ミドルウェアで保護済み)
 app.post('/api/pipeline/run', async (c) => {
   const result = await runDailyPipeline(c.env.DB, c.env.R2, c.env.OPENAI_API_KEY || '', c.env as any)
+  return c.json(result, result.ok ? 200 : 502)
+})
+
+// ── 手動トリガ: メンション回収→返信下書き生成(通常はJST 8/12/18/22時の自動実行) ──
+app.post('/api/replies/collect', async (c) => {
+  const { DB } = c.env
+  const result = await collectMentionsAndDraft(DB, String(c.env.OPENAI_API_KEY || ''), c.env as any)
+  if (!result.skippedNoCreds && (result.fetched > 0 || result.errors.length > 0)) {
+    await DB.prepare(
+      "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('sora', 'mention_collect_manual', ?, ?, CURRENT_TIMESTAMP)",
+    ).bind(result.ok ? 'success' : 'failed', JSON.stringify({ fetched: result.fetched, drafted: result.drafted, costUsd: result.costUsd, errors: result.errors.slice(0, 3) })).run()
+  }
+  return c.json(result, result.ok ? 200 : 502)
+})
+
+// ── 手動トリガ: 承認済み返信を今すぐ送信(通常は毎時の自動実行) ──
+app.post('/api/replies/publish', async (c) => {
+  const result = await publishApprovedReplies(c.env.DB, c.env as any)
+  return c.json(result, result.ok ? 200 : 502)
+})
+
+// ── 手動トリガ: 予約時刻到来分の承認済み投稿を今すぐXに送信(通常は毎時の自動実行) ──
+app.post('/api/sora/publish-due', async (c) => {
+  const result = await runSoraScheduledPublish(c.env.DB, c.env.R2, c.env as any)
+  return c.json(result, result.ok ? 200 : 502)
+})
+
+// ── 手動トリガ: セルフRT(インプ上位の自分の投稿をRT。1日1回ガードあり。通常はJST 21時の自動実行) ──
+app.post('/api/selfrepost/run', async (c) => {
+  const { DB } = c.env
+  const result = await runSelfRepost(DB, c.env as any)
+  if (!result.skippedNoCreds) {
+    await DB.prepare(
+      "INSERT INTO worker_logs (worker_name, action, status, output_json, finished_at) VALUES ('sora', 'self_repost_manual', ?, ?, CURRENT_TIMESTAMP)",
+    ).bind(result.ok ? 'success' : 'failed', JSON.stringify({ reposted: result.reposted, postId: result.postId, impressions: result.impressions, error: result.error })).run()
+  }
   return c.json(result, result.ok ? 200 : 502)
 })
 
